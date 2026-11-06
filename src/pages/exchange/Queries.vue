@@ -198,7 +198,8 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, onMounted } from 'vue';
+import { reactive, ref, watch, onMounted } from 'vue';
+import { useRoute } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { Search } from '@element-plus/icons-vue';
 import PageHeader from '@/components/common/PageHeader.vue';
@@ -207,7 +208,14 @@ import { exchangeApi } from '@/api/exchange';
 import { exchangeConfigApi, type ConfigRecord } from '@/api/exchangeConfig';
 import { apiErrorMessage } from '@/api/client';
 
+const route = useRoute();
 const tab = ref<'assistant' | 'encrypted' | 'direct'>('assistant');
+
+watch(() => route.query.tab, (val) => {
+  if (val === 'assistant' || val === 'encrypted' || val === 'direct') {
+    tab.value = val;
+  }
+}, { immediate: true });
 
 // Assistant Cascading State
 const tenantOptions = ref<any[]>([]);

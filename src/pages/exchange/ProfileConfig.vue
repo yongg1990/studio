@@ -38,7 +38,7 @@
   </div>
 </template>
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Plus, Search } from '@element-plus/icons-vue';
@@ -49,6 +49,13 @@ import { exchangeApi } from '@/api/exchange';
 import { apiErrorMessage } from '@/api/client';
 const route=useRoute();
 const kind=ref<ConfigKind>('version'), parentId=ref(String(route.query.profileId||''));
+
+watch(() => route.query.kind, (val) => {
+  if (val && ['version', 'dataset', 'rule', 'case', 'binding'].includes(String(val))) {
+    kind.value = val as ConfigKind;
+  }
+}, { immediate: true });
+
 const definition=computed(()=>configDefinitions[kind.value]);
 const parentLabel=computed(()=>({version:'规范包 ID',dataset:'规范版本 ID',rule:'数据集 ID',case:'规范版本 ID',binding:'项目空间 ID'}[kind.value]));
 const rows=ref<ConfigRecord[]>([]), form=ref<ConfigRecord>({}), detail=ref<ConfigRecord>({});

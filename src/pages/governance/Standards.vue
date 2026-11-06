@@ -14,9 +14,15 @@
       </template>
     </PageHeader>
 
-    <!-- Standards Overview Cards -->
-    <div class="panel" style="margin-bottom: 14px">
-      <div class="panel-header flex-between"><h2>值域定义</h2></div>
+    <el-tabs v-model="activeSection" class="mb-3">
+      <el-tab-pane label="数据元管理 (APP-03 数据元管理)" name="elements" />
+      <el-tab-pane label="值域代码集 (APP-03 值域管理)" name="valuesets" />
+      <el-tab-pane label="标准规范与全景概览" name="all" />
+    </el-tabs>
+
+    <!-- Standards Overview Cards (Shown on all or valuesets) -->
+    <div v-if="activeSection === 'all' || activeSection === 'valuesets'" class="panel" style="margin-bottom: 14px">
+      <div class="panel-header flex-between"><h2>值域定义 (Value Sets)</h2></div>
       <FilterBar @search="searchValueSets" @reset="resetValueSets">
         <el-input v-model="valueFilters.valueSetCode" placeholder="值域编码" clearable style="width: 150px" />
         <el-input v-model="valueFilters.valueSetName" placeholder="值域名称" clearable style="width: 150px" />
@@ -32,7 +38,7 @@
       </el-table>
       <div class="pagination-row"><el-pagination v-model:current-page="valuePage" :page-size="20" :total="valueTotal" layout="total, prev, pager, next" @current-change="loadValueSets" /></div>
     </div>
-    <div class="standards-banner">
+    <div v-if="activeSection === 'all'" class="standards-banner">
       <div v-for="std in standards" :key="std.code" class="std-card">
         <div class="std-badge">国家标准</div>
         <div class="std-name">{{ std.name }}</div>
@@ -44,8 +50,8 @@
       </div>
     </div>
 
-    <div class="grid-two">
-      <div class="panel">
+    <div :class="activeSection === 'all' ? 'grid-two' : 'grid-single'">
+      <div v-if="activeSection === 'all' || activeSection === 'elements'" class="panel">
         <div class="panel-header flex-between">
           <h2>数据元目录 (Data Elements)</h2>
         </div>
@@ -73,7 +79,7 @@
         <div class="pagination-row"><el-pagination v-model:current-page="elementPage" :page-size="20" :total="elementTotal" layout="total, prev, pager, next" @current-change="loadElements" /></div>
       </div>
 
-      <div class="panel">
+      <div v-if="activeSection === 'all' || activeSection === 'valuesets'" class="panel">
         <div class="panel-header flex-between">
           <h2>
             <span>值域明细: </span>
@@ -193,7 +199,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, watch, onMounted } from 'vue';
+import { useRoute } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import PageHeader from '@/components/common/PageHeader.vue';
 import FilterBar from '@/components/common/FilterBar.vue';
@@ -201,6 +208,9 @@ import StatusTag from '@/components/common/StatusTag.vue';
 import { governanceApi } from '@/api/governance';
 import { standardsApi, type DataElement, type ValueSet, type ValueSetItem } from '@/api/standards';
 import { apiErrorMessage } from '@/api/client';
+
+const route = useRoute();
+const activeSection = ref<'elements' | 'valuesets' | 'all'>('elements');
 
 const standards = ref<any[]>([]);
 const valueSets = ref<ValueSet[]>([]);
@@ -266,6 +276,19 @@ async function submitImportDataElements() {
     importing.value = false;
   }
 }
+
+watch(() => route.query, (q) => {
+  if (q.section === 'elements' || q.section === 'valuesets' || q.section === 'all') {
+    activeSection.value = q.section;
+  }
+  if (q.action === 'import') {
+    openImportDialog();
+  } else if (q.action === 'create-element') {
+    openDataElementModal();
+  } else if (q.action === 'create-valueset') {
+    openValueSetModal();
+  }
+}, { immediate: true });
 const dataTypes = ['STRING', 'DECIMAL', 'INTEGER', 'BOOLEAN', 'DATE', 'DATETIME', 'OBJECT', 'ARRAY'];
 const securityClasses = ['PUBLIC', 'INTERNAL', 'SENSITIVE', 'STRICT_SENSITIVE'];
 const emptyElementFilters = () => ({ elementCode: '', elementName: '', dataType: '', valueSetCode: '', securityClass: '', status: '' });

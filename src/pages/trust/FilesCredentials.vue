@@ -208,6 +208,7 @@
 
 <script setup lang="ts">
 import { reactive, ref, watch, onMounted } from 'vue';
+import { useRoute } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import PageHeader from '@/components/common/PageHeader.vue';
 import JsonEditor from '@/components/common/JsonEditor.vue';
@@ -215,7 +216,17 @@ import UploadSessionTransfer from '@/components/common/UploadSessionTransfer.vue
 import { extendedServices } from '@/api/extendedServices';
 import { apiErrorMessage } from '@/api/client';
 
+const route = useRoute();
 const tab = ref<'tenant-files' | 'credentials' | 'files'>('tenant-files');
+
+watch(() => route.query, (q) => {
+  if (q.tab === 'tenant-files' || q.tab === 'credentials' || q.tab === 'files') {
+    tab.value = q.tab;
+  }
+  if (q.action === 'upload') {
+    openUploadDialog();
+  }
+}, { immediate: true });
 const lookupId = ref('');
 const sessionLookup = ref(true);
 const objectVersion = ref('');

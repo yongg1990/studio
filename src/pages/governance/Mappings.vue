@@ -178,7 +178,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, watch, onMounted } from 'vue';
+import { useRoute } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import PageHeader from '@/components/common/PageHeader.vue';
 import JsonEditor from '@/components/common/JsonEditor.vue';
@@ -186,7 +187,14 @@ import StatusTag from '@/components/common/StatusTag.vue';
 import { governanceApi, type MappingIssue } from '@/api/governance';
 import { apiErrorMessage } from '@/api/client';
 
+const route = useRoute();
 const activeTab = ref<'valueSetMappings' | 'precheck'>('valueSetMappings');
+
+watch(() => route.query.tab, (val) => {
+  if (val === 'valueSetMappings' || val === 'precheck') {
+    activeTab.value = val;
+  }
+}, { immediate: true });
 
 // Value Set Mappings state
 const mappingSourceSysId = ref(localStorage.getItem('tcmirp_source_system_id') || '1');

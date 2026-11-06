@@ -292,12 +292,20 @@ import { ref, reactive, computed, onMounted } from 'vue';
 import { ElMessage } from 'element-plus';
 import PageHeader from '@/components/common/PageHeader.vue';
 import FilterBar from '@/components/common/FilterBar.vue';
+import { useRoute } from 'vue-router';
 import JsonEditor from '@/components/common/JsonEditor.vue';
 import StatusTag from '@/components/common/StatusTag.vue';
 import { governanceApi, type IngestBatch } from '@/api/governance';
 import { apiErrorMessage } from '@/api/client';
 
+const route = useRoute();
 const activeTab = ref<'rawRecords' | 'batchJobs'>('rawRecords');
+
+watch(() => route.query.tab, (tabVal) => {
+  if (tabVal === 'rawRecords' || tabVal === 'batchJobs') {
+    activeTab.value = tabVal;
+  }
+}, { immediate: true });
 
 // Raw Records state
 const rawRecords = ref<any[]>([]);
