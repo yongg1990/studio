@@ -1,0 +1,733 @@
+<template>
+  <div class="governance-page">
+    <PageHeader
+      title="来源接入与数据治理"
+      subtitle="APP-03 原始记录留存、全生命周期状态排查与手动重放治理"
+    >
+      <template #actions>
+        <el-button @click="refreshCurrent">刷新数据</el-button>
+        <el-button @click="rawVisible = true">留存原始记录</el-button>
+        <el-button @click="openReplayDialog()">重放治理记录</el-button>
+        <el-button type="primary" @click="openCreateBatchModal">+ 创建接入批次作业</el-button>
+      </template>
+    </PageHeader>
+
+    <el-tabs v-model="activeTab" class="mb-3">
+      <el-tab-pane label="原始接入记录与治理" name="rawRecords" />
+      <el-tab-pane label="接入批次作业查询" name="batchJobs" />
+    </el-tabs>
+
+    <div v-if="lastOperation" class="operation-result panel">
+      <div class="panel-header">
+        <h2>{{ lastOperation.title }}</h2>
+        <el-button text size="small" @click="lastOperation = null">关闭</el-button>
+      </div>
+      <div class="operation-grid">
+        <div v-for="item in lastOperation.items" :key="item.label" class="operation-item">
+          <span class="operation-label">{{ item.label }}</span>
+          <span class="operation-value mono">{{ item.value || '-' }}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 1: Raw Records Table -->
+    <div v-if="activeTab === 'rawRecords'">
+      <FilterBar @search="handleRawSearch" @reset="handleRawReset">
+        <el-input v-model="rawFilters.sourceBusinessKey" placeholder="来源业务键" style="width: 200px" clearable />
+        <el-select v-model="rawFilters.status" placeholder="治理处理状态" style="width: 200px" clearable>
+          <el-option label="全部状态" value="" />
+          <el-option label="已接收 RECEIVED" value="RECEIVED" />
+          <el-option label="映射中 MAPPING" value="MAPPING" />
+          <el-option label="已映射 MAPPED" value="MAPPED" />
+          <el-option label="事件已受理 EVENT_ACCEPTED" value="EVENT_ACCEPTED" />
+          <el-option label="待治理介入 GOVERNANCE_REQUIRED" value="GOVERNANCE_REQUIRED" />
+          <el-option label="待重试 RETRY_PENDING" value="RETRY_PENDING" />
+        </el-select>
+        <el-date-picker
+          v-model="rawDateRange"
+          type="datetimerange"
+          range-separator="至"
+          start-placeholder="接收时间起"
+          end-placeholder="接收时间止"
+          value-format="YYYY-MM-DD HH:mm:ss"
+          style="width: 330px"
+        />
+      </FilterBar>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>原始接入记录 (共 {{ rawTotal }} 条)</h2>
+        </div>
+        <el-table :data="rawRecords" v-loading="rawLoading" @row-click="openRawDetailDrawer" style="width: 100%; cursor: pointer">
+          <el-table-column prop="id" label="原始记录 ID" width="160" class-name="mono">
+            <template #default="{ row }">
+              <span class="font-semibold text-emerald-800">{{ row.id }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="sourceBusinessKey" label="来源业务键" min-width="180" class-name="mono" show-overflow-tooltip />
+          <el-table-column prop="sourceSystemId" label="来源系统 ID" width="130" class-name="mono" />
+          <el-table-column prop="contentDigest" label="内容摘要" min-width="200" class-name="mono" show-overflow-tooltip />
+          <el-table-column label="处理状态" width="180">
+            <template #default="{ row }">
+              <StatusTag :code="row.status" />
+            </template>
+          </el-table-column>
+          <el-table-column prop="receivedAt" label="接收时间" width="170">
+            <template #default="{ row }">{{ row.receivedAt || row.createdAt || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="180" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" type="primary" link @click.stop="openRawDetailDrawer(row)">查看信封</el-button>
+              <el-button size="small" type="warning" link @click.stop="openReplayDialog(row.id)">重放治理</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div class="pagination-container">
+          <el-pagination
+            v-model:current-page="rawPage"
+            v-model:page-size="rawPageSize"
+            :total="Number(rawTotal)"
+            :page-sizes="[10, 20, 50, 100]"
+            layout="total, sizes, prev, pager, next"
+            @current-change="loadRawRecords"
+            @size-change="loadRawRecords"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: Batch Jobs Table -->
+    <div v-if="activeTab === 'batchJobs'">
+      <FilterBar @search="handleSearch" @reset="handleReset">
+        <el-input v-model="batchId" placeholder="批量任务 ID（必填）" style="width: 220px" clearable />
+        <el-switch v-model="includeFailures" active-text="包含失败明细" />
+      </FilterBar>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2>接入作业运行记录 ({{ batches.length }})</h2>
+          <span v-if="totalFailed !== '0'" class="sub-text">失败记录 {{ totalFailed }} 条</span>
+        </div>
+        <div class="panel-body">
+          <el-table :data="batches" v-loading="loading" style="width: 100%" empty-text="未找到匹配的接入批次">
+            <el-table-column prop="batchId" label="批次号" min-width="160" class-name="mono">
+              <template #default="{ row }">
+                <span class="batch-id-text">{{ row.batchId }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="mappingProfileVersion" label="映射配置版本" width="140" class-name="mono" />
+            <el-table-column label="目标 Schema 版本" min-width="180" show-overflow-tooltip>
+              <template #default="{ row }">{{ JSON.stringify(row.targetSchemaVersions || {}) }}</template>
+            </el-table-column>
+            <el-table-column prop="totalCount" label="记录总数" width="110" align="center" />
+            <el-table-column label="处理成功 / 失败" min-width="160">
+              <template #default="{ row }">
+                <span class="text-success mono">{{ row.successCount }}</span>
+                <span class="divider-slash">/</span>
+                <span class="text-danger mono">{{ row.failCount }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="processedAt" label="处理时间" min-width="170" />
+            <el-table-column label="状态" width="110">
+              <template #default="{ row }">
+                <StatusTag :code="row.status" />
+              </template>
+            </el-table-column>
+            <el-table-column label="操作 / 排查" width="140" fixed="right">
+              <template #default="{ row }">
+                <el-button size="small" type="primary" link @click="openErrorDrawer(row)">
+                  失败明细
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Raw Record Detail Drawer -->
+    <el-drawer v-model="rawDrawerVisible" title="原始记录与治理详情" size="640px" :close-on-click-modal="false">
+      <div v-if="selectedRawRecord" class="space-y-4">
+        <el-descriptions :column="2" border size="small">
+          <el-descriptions-item label="原始记录 ID" :span="2"><span class="mono font-bold">{{ selectedRawRecord.id }}</span></el-descriptions-item>
+          <el-descriptions-item label="来源业务键" :span="2"><span class="mono">{{ selectedRawRecord.sourceBusinessKey }}</span></el-descriptions-item>
+          <el-descriptions-item label="租户 ID">{{ selectedRawRecord.tenantId }}</el-descriptions-item>
+          <el-descriptions-item label="项目空间 ID">{{ selectedRawRecord.projectSpaceId }}</el-descriptions-item>
+          <el-descriptions-item label="来源系统 ID">{{ selectedRawRecord.sourceSystemId }}</el-descriptions-item>
+          <el-descriptions-item label="处理状态"><StatusTag :code="selectedRawRecord.status" /></el-descriptions-item>
+          <el-descriptions-item label="内容类型">{{ selectedRawRecord.contentType }}</el-descriptions-item>
+          <el-descriptions-item label="接收时间">{{ selectedRawRecord.receivedAt || selectedRawRecord.createdAt }}</el-descriptions-item>
+          <el-descriptions-item label="摘要" :span="2"><span class="mono text-xs break-all">{{ selectedRawRecord.contentDigest }}</span></el-descriptions-item>
+        </el-descriptions>
+
+        <div class="mt-4">
+          <div class="font-bold text-sm text-gray-700 mb-2">原始接入信封 (Raw Payload)</div>
+          <pre class="bg-gray-900 text-emerald-400 p-4 rounded text-xs overflow-auto max-h-[460px] mono">{{ selectedRawRecord.rawPayload || '{}' }}</pre>
+        </div>
+
+        <div class="flex justify-end gap-3 pt-3">
+          <el-button type="warning" @click="openReplayDialog(selectedRawRecord.id)">触发重新治理重放</el-button>
+        </div>
+      </div>
+    </el-drawer>
+
+    <!-- Error Drawer -->
+    <el-drawer v-model="drawerVisible" title="接入批次失败明细" size="520px" :close-on-click-modal="false">
+      <div v-if="selectedBatch" class="drawer-inner">
+        <div class="batch-meta-banner">
+          <div class="meta-item">
+            <span class="meta-label">批次号:</span>
+            <span class="meta-val mono">{{ selectedBatch.batchId }}</span>
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">失败记录:</span>
+            <span class="meta-val text-danger">{{ selectedBatch.failCount }} 条</span>
+          </div>
+        </div>
+
+        <el-table :data="selectedBatch.failedRecordDetails || []" empty-text="接口未返回失败明细">
+          <el-table-column prop="lineNo" label="行号" width="70" />
+          <el-table-column prop="code" label="错误码" width="110" />
+          <el-table-column prop="fieldPath" label="字段路径" width="120" />
+          <el-table-column prop="ruleCode" label="规则码" width="110" />
+          <el-table-column prop="message" label="消息" min-width="180" />
+        </el-table>
+      </div>
+    </el-drawer>
+
+    <!-- Create Batch Modal (OpenAPI: POST /openapi/v1/batches) -->
+    <el-dialog v-model="createBatchVisible" title="创建数据接入批次作业" width="560px" :close-on-click-modal="false">
+      <el-form :model="batchForm" label-position="top">
+        <el-form-item label="批次唯一编码 (batchCode)" required>
+          <el-input v-model="batchForm.batchCode" placeholder="如: BATCH-KM-05" />
+        </el-form-item>
+        <el-form-item label="来源批次键 (sourceBatchKey)"><el-input v-model="batchForm.sourceBatchKey" /></el-form-item>
+        <div style="display: flex; gap: 12px;">
+          <el-form-item label="文件 ID (fileId)" style="flex: 1" required>
+            <el-input v-model="batchForm.fileId" placeholder="数字 ID 字符串" />
+          </el-form-item>
+          <el-form-item label="业务用途 (businessPurpose)" style="flex: 1" required>
+            <el-input v-model="batchForm.businessPurpose" placeholder="TRACE" />
+          </el-form-item>
+        </div>
+        <div style="display: flex; gap: 12px;">
+          <el-form-item label="来源系统 ID" style="flex: 1" required>
+            <el-input v-model="batchForm.sourceSystemId" placeholder="数字 ID 字符串" />
+          </el-form-item>
+          <el-form-item label="输入数据格式 (inputFormat)" style="flex: 1" required>
+            <el-select v-model="batchForm.inputFormat" style="width: 100%">
+              <el-option label="JSON" value="JSON" />
+              <el-option label="CSV" value="CSV" />
+              <el-option label="XML" value="XML" />
+            </el-select>
+          </el-form-item>
+        </div>
+        <div style="display: flex; gap: 12px;">
+          <el-form-item label="映射规则配置编码 (mappingProfileCode)" style="flex: 1" required>
+            <el-input v-model="batchForm.mappingProfileCode" placeholder="MP_WMS_TO_WAREHOUSED" />
+          </el-form-item>
+          <el-form-item label="规则版本 (mappingProfileVersion)" style="flex: 1" required>
+            <el-input v-model="batchForm.mappingProfileVersion" placeholder="1.4.0" />
+          </el-form-item>
+        </div>
+        <div style="display: flex; gap: 12px;">
+          <el-form-item label="预期记录总数 (expectedRecordCount)" style="flex: 1">
+            <el-input v-model="batchForm.expectedRecordCount" placeholder="数字字符串" />
+          </el-form-item>
+          <el-form-item label="提交处理模式" style="flex: 1">
+            <el-select v-model="batchForm.submitMode" style="width: 100%">
+              <el-option label="ASYNC - 异步入队" value="ASYNC" />
+              <el-option label="SYNC - 同步校验" value="SYNC" />
+            </el-select>
+          </el-form-item>
+        </div>
+        <el-form-item label="容错策略 (onError)">
+          <el-radio-group v-model="batchForm.onError">
+            <el-radio value="CONTINUE_ON_ERROR">遇到单条错误继续执行 (CONTINUE_ON_ERROR)</el-radio>
+            <el-radio value="STOP_ON_ERROR">遇错即停 (STOP_ON_ERROR)</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createBatchVisible = false">取消</el-button>
+        <el-button type="primary" :loading="creatingBatch" @click="confirmCreateBatch">确认提交</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Replay Dialog -->
+    <el-dialog v-model="replayVisible" title="重放原始记录" width="480px" :close-on-click-modal="false">
+      <el-form label-position="top">
+        <el-form-item label="原始记录 ID" required><el-input v-model="replayRawId" /></el-form-item>
+        <el-form-item label="映射版本" required><el-input v-model="replayVersion" placeholder="STANDARD" /></el-form-item>
+        <el-form-item label="重放原因" required><el-input v-model="replayReason" placeholder="例如：规则更新后重新治理" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="replayVisible = false">取消</el-button>
+        <el-button type="primary" :loading="replaying" @click="triggerReplay">提交重放</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Raw Preservation Dialog -->
+    <el-dialog v-model="rawVisible" title="留存原始记录" width="560px" :close-on-click-modal="false">
+      <el-form :model="rawForm" label-position="top">
+        <el-form-item label="项目空间 ID" required><el-input v-model="rawForm.projectSpaceId" placeholder="数字 ID 字符串" /></el-form-item>
+        <el-form-item label="批量任务 ID"><el-input v-model="rawForm.batchId" placeholder="数字 ID 字符串" /></el-form-item>
+        <el-form-item label="来源系统 ID" required><el-input v-model="rawForm.sourceSystemId" placeholder="数字 ID 字符串" /></el-form-item>
+        <el-form-item label="来源业务键" required><el-input v-model="rawForm.sourceBusinessKey" /></el-form-item>
+        <el-form-item label="内容类型" required><el-input v-model="rawForm.contentType" placeholder="application/json" /></el-form-item>
+        <el-form-item label="内容摘要"><el-input v-model="rawForm.contentDigest" /></el-form-item>
+        <el-form-item label="文件片段引用"><el-input v-model="rawForm.fileFragmentRef" /></el-form-item>
+        <el-form-item label="原始内容"><JsonEditor v-if="/\bjson\b/i.test(rawForm.contentType)" v-model="rawForm.rawPayload" :rows="6" label="原始内容 JSON" /><el-input v-else v-model="rawForm.rawPayload" type="textarea" :rows="6" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="rawVisible = false">取消</el-button>
+        <el-button type="primary" :loading="preserving" @click="preserveRaw">提交留存</el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, reactive, computed, onMounted } from 'vue';
+import { ElMessage } from 'element-plus';
+import PageHeader from '@/components/common/PageHeader.vue';
+import FilterBar from '@/components/common/FilterBar.vue';
+import JsonEditor from '@/components/common/JsonEditor.vue';
+import StatusTag from '@/components/common/StatusTag.vue';
+import { governanceApi, type IngestBatch } from '@/api/governance';
+import { apiErrorMessage } from '@/api/client';
+
+const activeTab = ref<'rawRecords' | 'batchJobs'>('rawRecords');
+
+// Raw Records state
+const rawRecords = ref<any[]>([]);
+const rawLoading = ref(false);
+const rawTotal = ref('0');
+const rawPage = ref(1);
+const rawPageSize = ref(20);
+const rawDateRange = ref<[string, string] | null>(null);
+const rawFilters = reactive({
+  sourceBusinessKey: '',
+  status: ''
+});
+const rawDrawerVisible = ref(false);
+const selectedRawRecord = ref<any>(null);
+
+// Replay state
+const replayRawId = ref('');
+const replayVersion = ref('STANDARD');
+const replayReason = ref('异常规则已修正，手动触发重放');
+const replayVisible = ref(false);
+const replaying = ref(false);
+
+// Raw preserve state
+const rawVisible = ref(false);
+const preserving = ref(false);
+const rawForm = ref({
+  projectSpaceId: localStorage.getItem('tcmirp_project_space_id') || '1',
+  batchId: '',
+  sourceSystemId: localStorage.getItem('tcmirp_source_system_id') || '1',
+  sourceBusinessKey: '',
+  contentType: 'application/json',
+  contentDigest: '',
+  fileFragmentRef: '',
+  rawPayload: ''
+});
+
+// Batch Jobs state
+const batchId = ref('');
+const includeFailures = ref(true);
+const drawerVisible = ref(false);
+const createBatchVisible = ref(false);
+const creatingBatch = ref(false);
+const selectedBatch = ref<IngestBatch | null>(null);
+const loading = ref(false);
+const batches = ref<IngestBatch[]>([]);
+const lastOperation = ref<{ title: string; items: Array<{ label: string; value: string }> } | null>(null);
+
+const batchForm = ref({
+  batchCode: '',
+  sourceSystemId: localStorage.getItem('tcmirp_source_system_id') || '1',
+  mappingProfileCode: '',
+  mappingProfileVersion: '',
+  inputFormat: 'JSON',
+  fileId: '',
+  businessPurpose: 'TRACE',
+  sourceBatchKey: '',
+  expectedRecordCount: '',
+  submitMode: 'ASYNC',
+  onError: 'CONTINUE_ON_ERROR'
+});
+
+const loadRawRecords = async () => {
+  rawLoading.value = true;
+  try {
+    const res = await governanceApi.listRawRecords({
+      sourceBusinessKey: rawFilters.sourceBusinessKey.trim() || undefined,
+      status: rawFilters.status || undefined,
+      receivedFrom: rawDateRange.value?.[0],
+      receivedTo: rawDateRange.value?.[1],
+      page: rawPage.value,
+      size: rawPageSize.value
+    });
+    const records = res.records || [];
+    rawRecords.value = records;
+    rawTotal.value = String(res.total || records.length);
+  } catch (err) {
+    console.error('Failed to load raw records', err);
+    rawRecords.value = [];
+    rawTotal.value = '0';
+  } finally {
+    rawLoading.value = false;
+  }
+};
+
+const handleRawSearch = () => {
+  rawPage.value = 1;
+  loadRawRecords();
+};
+
+const handleRawReset = () => {
+  rawFilters.sourceBusinessKey = '';
+  rawFilters.status = '';
+  rawDateRange.value = null;
+  rawPage.value = 1;
+  loadRawRecords();
+};
+
+const openRawDetailDrawer = async (row: any) => {
+  try {
+    const detail = await governanceApi.getRawRecord(row.id);
+    selectedRawRecord.value = detail || row;
+  } catch {
+    selectedRawRecord.value = row;
+  }
+  rawDrawerVisible.value = true;
+};
+
+const openReplayDialog = (id?: string) => {
+  replayRawId.value = id || '';
+  replayVersion.value = 'STANDARD';
+  replayReason.value = '异常规则已修正，手动触发重放';
+  replayVisible.value = true;
+};
+
+const refreshCurrent = () => {
+  if (activeTab.value === 'rawRecords') loadRawRecords();
+  else loadBatches();
+};
+
+const openCreateBatchModal = () => {
+  batchForm.value = {
+    batchCode: `BATCH-${Date.now().toString().slice(-6)}`,
+    sourceSystemId: localStorage.getItem('tcmirp_source_system_id') || '1',
+    mappingProfileCode: 'MP_WMS_TO_WAREHOUSED',
+    mappingProfileVersion: '1.0.0',
+    inputFormat: 'JSON',
+    fileId: '1',
+    businessPurpose: 'TRACE',
+    sourceBatchKey: '',
+    expectedRecordCount: '10',
+    submitMode: 'ASYNC',
+    onError: 'CONTINUE_ON_ERROR'
+  };
+  createBatchVisible.value = true;
+};
+
+const confirmCreateBatch = async () => {
+  const numericFields = [batchForm.value.sourceSystemId, batchForm.value.fileId, batchForm.value.expectedRecordCount].filter(Boolean);
+  if (numericFields.some(value => !/^-?\d+$/.test(value))) {
+    ElMessage.warning('来源系统 ID、文件 ID 和预期记录数必须是数字字符串');
+    return;
+  }
+  if (!batchForm.value.batchCode || !batchForm.value.sourceSystemId || !batchForm.value.fileId || !batchForm.value.mappingProfileCode || !batchForm.value.mappingProfileVersion || !batchForm.value.businessPurpose || !batchForm.value.inputFormat || !batchForm.value.onError || !batchForm.value.submitMode) {
+    ElMessage.warning('请填写所有必填字段');
+    return;
+  }
+  creatingBatch.value = true;
+  try {
+    const form = batchForm.value;
+    const res = await governanceApi.createBatch({
+      batchCode: form.batchCode,
+      sourceSystemId: form.sourceSystemId,
+      mappingProfileCode: form.mappingProfileCode,
+      mappingProfileVersion: form.mappingProfileVersion,
+      inputFormat: form.inputFormat,
+      fileId: form.fileId,
+      businessPurpose: form.businessPurpose,
+      onError: form.onError,
+      submitMode: form.submitMode,
+      ...(form.sourceBatchKey.trim() ? { sourceBatchKey: form.sourceBatchKey.trim() } : {}),
+      ...(form.expectedRecordCount.trim() ? { expectedRecordCount: form.expectedRecordCount.trim() } : {})
+    });
+    batchId.value = String(res.batchId);
+    lastOperation.value = {
+      title: '批次受理结果',
+      items: [
+        { label: '批次 ID', value: String(res.batchId || '') },
+        { label: '业务编号', value: res.batchCode || '' },
+        { label: '任务状态', value: res.batchStatus || '' },
+        { label: '受理时间', value: res.acceptedAt || '' },
+        { label: '状态查询地址', value: res.statusQueryUrl || '' }
+      ]
+    };
+    createBatchVisible.value = false;
+    ElMessage.success(`批次作业 [${res.batchCode}] 已受理`);
+  } catch (e) {
+    ElMessage.error(apiErrorMessage(e, '创建批次作业失败'));
+    return;
+  } finally {
+    creatingBatch.value = false;
+  }
+  activeTab.value = 'batchJobs';
+  if (batchId.value) await loadBatches();
+};
+
+const sumCount = (field: 'totalCount' | 'successCount' | 'failCount') =>
+  batches.value.reduce((acc, cur) => acc + BigInt(cur[field] || '0'), 0n);
+
+const totalFailed = computed(() => sumCount('failCount').toString());
+
+const loadBatches = async () => {
+  if (!batchId.value.trim()) {
+    batches.value = [];
+    return;
+  }
+  if (!/^-?\d+$/.test(batchId.value.trim())) {
+    batches.value = [];
+    ElMessage.warning('批量任务 ID 必须是数字字符串');
+    return;
+  }
+  loading.value = true;
+  try {
+    batches.value = await governanceApi.getBatches({
+      batchId: batchId.value || undefined,
+      includeFailures: includeFailures.value,
+      pageNo: 1,
+      pageSize: 100
+    });
+  } catch (err) {
+    batches.value = [];
+    console.error('Failed to load batches', err);
+    ElMessage.error(apiErrorMessage(err, '批次查询失败'));
+  } finally {
+    loading.value = false;
+  }
+};
+
+const handleSearch = async () => {
+  await loadBatches();
+};
+
+const handleReset = async () => {
+  batchId.value = '';
+  includeFailures.value = true;
+  await loadBatches();
+};
+
+const openErrorDrawer = (row: IngestBatch) => {
+  selectedBatch.value = row;
+  drawerVisible.value = true;
+};
+
+const triggerReplay = async () => {
+  if (!/^-?\d+$/.test(replayRawId.value) || !replayVersion.value.trim() || !replayReason.value.trim()) {
+    ElMessage.warning('请输入原始记录 ID、映射版本和重放原因');
+    return;
+  }
+  replaying.value = true;
+  try {
+    const res = await governanceApi.replayRawRecord(replayRawId.value, replayVersion.value, replayReason.value);
+    lastOperation.value = {
+      title: '原始记录重放结果',
+      items: [
+        { label: '重放 ID', value: String(res.replayId || '') },
+        { label: '原始记录 ID', value: String(res.rawRecordId || '') },
+        { label: '映射版本', value: res.mappingVersion || '' },
+        { label: '处理状态', value: res.status || '' },
+        { label: '请求时间', value: res.requestedAt || '' }
+      ]
+    };
+    ElMessage.success(`原始记录重放已受理，任务 ID: ${res.replayId}`);
+    replayVisible.value = false;
+    await loadRawRecords();
+  } catch (err) {
+    ElMessage.error(apiErrorMessage(err, '重放请求失败'));
+  } finally {
+    replaying.value = false;
+  }
+};
+
+const preserveRaw = async () => {
+  const form = rawForm.value;
+  const numericIds = [form.projectSpaceId, form.batchId, form.sourceSystemId].filter(Boolean);
+  if (numericIds.some(value => !/^-?\d+$/.test(value))) {
+    ElMessage.warning('项目空间 ID、批量任务 ID 和来源系统 ID 必须是数字字符串');
+    return;
+  }
+  if (!form.projectSpaceId || !form.sourceSystemId || !form.sourceBusinessKey.trim() || !form.contentType.trim() || (!form.rawPayload && !form.fileFragmentRef)) {
+    ElMessage.warning('请填写必填字段及原始内容或文件片段引用');
+    return;
+  }
+  if (/\bjson\b/i.test(form.contentType) && form.rawPayload.trim()) {
+    try { JSON.parse(form.rawPayload); }
+    catch { ElMessage.warning('原始内容必须是有效 JSON'); return; }
+  }
+  preserving.value = true;
+  try {
+    const result = await governanceApi.preserveRawRecord({
+      projectSpaceId: form.projectSpaceId,
+      sourceSystemId: form.sourceSystemId,
+      ...(form.batchId ? { batchId: form.batchId } : {}),
+      sourceBusinessKey: form.sourceBusinessKey,
+      contentType: form.contentType,
+      ...(form.contentDigest ? { contentDigest: form.contentDigest } : {}),
+      ...(form.fileFragmentRef ? { fileFragmentRef: form.fileFragmentRef } : {}),
+      ...(form.rawPayload ? { rawPayload: form.rawPayload } : {})
+    });
+    replayRawId.value = String(result.rawRecordId);
+    lastOperation.value = {
+      title: '原始记录留存结果',
+      items: [
+        { label: '原始记录 ID', value: String(result.rawRecordId || '') },
+        { label: '内容摘要', value: result.contentDigest || '' },
+        { label: '记录状态', value: result.status || '' },
+        { label: '幂等命中', value: result.duplicate ? '是' : '否' }
+      ]
+    };
+    rawVisible.value = false;
+    ElMessage.success(`原始记录 ${result.rawRecordId} 已受理${result.duplicate ? '（幂等命中）' : ''}`);
+    await loadRawRecords();
+  } catch (err) {
+    ElMessage.error(apiErrorMessage(err, '原始记录留存失败'));
+  } finally {
+    preserving.value = false;
+  }
+};
+
+onMounted(() => {
+  loadRawRecords();
+});
+</script>
+
+<style scoped>
+.governance-page {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding-bottom: 24px;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: #fbfdfc;
+}
+
+.panel-header h2 {
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--color-ink);
+  margin: 0;
+}
+
+.sub-text {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.operation-result {
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+
+.operation-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.operation-item {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.operation-label {
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.operation-value {
+  overflow-wrap: anywhere;
+  color: var(--color-ink);
+  font-size: 12px;
+}
+
+.batch-id-text {
+  font-weight: 600;
+  color: var(--color-brand);
+}
+
+.divider-slash {
+  margin: 0 4px;
+  color: var(--color-border);
+}
+
+.text-success {
+  color: var(--color-brand);
+  font-weight: 600;
+}
+
+.text-danger {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.drawer-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.batch-meta-banner {
+  background: #f8faf9;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.meta-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.meta-label {
+  color: var(--color-muted);
+}
+
+.meta-val {
+  font-weight: 600;
+}
+
+.pagination-container {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 16px;
+  border-top: 1px solid var(--color-border);
+  background: #fafbfa;
+}
+
+.mono {
+  font-family: Consolas, Monaco, "Courier New", monospace;
+}
+</style>

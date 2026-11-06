@@ -1,0 +1,10 @@
+node_modules/
+build/
+dist/
+hutong/
+coverage/
+.DS_Store
+*.log
+.env*
+outputs
+!.env.example

@@ -1,0 +1,573 @@
+<template>
+  <div class="schema-form-wrapper">
+    <!-- Anchor Navigation Header -->
+    <div class="anchor-nav-bar">
+      <div class="nav-links">
+        <a
+          v-for="group in schemaConfig.groups"
+          :key="group.code"
+          :href="'#group-' + group.code"
+          class="anchor-link"
+        >
+          {{ group.title }}
+        </a>
+        <a href="#group-EVIDENCE" class="anchor-link">关联证据凭证</a>
+      </div>
+      <div class="schema-badge">
+        <StatusTag :code="schemaConfig.status" />
+        <span class="version-text mono">Schema v{{ schemaConfig.schemaVersion }}</span>
+      </div>
+    </div>
+
+    <!-- Main Layout: Left Form + Right Evidence Side Panel -->
+    <div class="form-layout-grid">
+      <div class="form-sections-col">
+        <div
+          v-for="group in schemaConfig.groups"
+          :key="group.code"
+          :id="'group-' + group.code"
+          class="form-card-section"
+        >
+          <div class="section-header">
+            <h3>{{ group.title }}</h3>
+          </div>
+
+          <div class="fields-grid">
+            <template v-for="fieldKey in group.fields" :key="fieldKey">
+              <!-- Special Grid overrides -->
+              <div v-if="fieldKey === 'indicatorsGrid'" class="field-item full-width">
+                <InspectionIndicatorGrid v-model="formData.indicators" />
+              </div>
+              <div v-else-if="fieldKey === 'prescriptionItemsGrid'" class="field-item full-width">
+                <PrescriptionItemGrid v-model="formData.items" />
+              </div>
+              <div v-else-if="fieldKey === 'traceCodeHierarchy'" class="field-item full-width">
+                <TraceCodeHierarchyInput />
+              </div>
+
+              <!-- Standard dynamic fields -->
+              <div v-else class="field-item">
+                <label>
+                  <em class="req-star" v-if="isRequiredField(fieldKey)">*</em>
+                  {{ getFieldTitle(fieldKey) }}
+                </label>
+
+                <!-- Input according to schema property type -->
+                <el-select
+                  v-if="getFieldProperty(fieldKey)?.enum"
+                  v-model="formData[fieldKey]"
+                  placeholder="请选择"
+                  style="width: 100%"
+                >
+                  <el-option
+                    v-for="opt in getFieldProperty(fieldKey).enum"
+                    :key="opt"
+                    :label="opt"
+                    :value="opt"
+                  />
+                </el-select>
+
+                <el-input-number
+                  v-else-if="getFieldProperty(fieldKey)?.type === 'number'"
+                  v-model="formData[fieldKey]"
+                  :min="getFieldProperty(fieldKey)?.minimum || 0"
+                  style="width: 100%"
+                />
+
+                <el-date-picker
+                  v-else-if="getFieldProperty(fieldKey)?.format === 'date'"
+                  v-model="formData[fieldKey]"
+                  type="date"
+                  value-format="YYYY-MM-DD"
+                  placeholder="选择日期"
+                  style="width: 100%"
+                />
+
+                <el-input
+                  v-else
+                  v-model="formData[fieldKey]"
+                  :placeholder="getFieldProperty(fieldKey)?.description || ('请输入 ' + getFieldTitle(fieldKey))"
+                />
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Side Evidence & Draft Side Panel -->
+      <aside class="evidence-side-panel" id="group-EVIDENCE">
+        <div class="side-card">
+          <div class="side-card-title">关联追溯凭证</div>
+          <EvidencePicker v-model="formData.evidenceIds" />
+        </div>
+
+        <div v-if="!isStaticMode()" class="side-notice">
+          <strong>生产提交合规规则：</strong>
+          <p>表单将显式锁定并提交 {{ schemaConfig.eventType }} 的 Schema v{{ schemaConfig.schemaVersion }}，提交时自动附带 <code>X-Idempotency-Key</code> 幂等标头。</p>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Fixed Bottom Submit Bar -->
+    <el-button v-if="!isStaticMode()" :loading="loadingSchema" @click="loadPublishedSchema">加载已发布 Schema</el-button>
+    <el-form label-position="top" class="event-context-form"><el-form-item label="事件类型代码"><el-input v-model="eventMeta.eventType" /></el-form-item><el-form-item label="Schema 版本" required><el-input v-model="eventMeta.schemaVersion" /></el-form-item><el-form-item label="来源业务键（每次动作唯一）" required><el-input v-model="eventMeta.sourceBusinessKey" /></el-form-item><el-form-item label="发生时间" required><el-date-picker v-model="eventMeta.occurredAt" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" /></el-form-item><el-form-item label="原始记录 ID（事实引擎可选）"><el-input v-model="eventMeta.rawRecordId" /></el-form-item><el-form-item label="提交方式"><el-radio-group v-model="eventMeta.useFactEngine"><el-radio-button :value="false">业务接口</el-radio-button><el-radio-button :value="true">事实引擎</el-radio-button></el-radio-group></el-form-item><el-form-item label="Payload JSON"><JsonEditor v-model="payloadText" :rows="8" label="Payload JSON" /></el-form-item></el-form>
+    <div class="fixed-submit-bar">
+      <div class="draft-info">
+        <span class="dot-green"></span>
+        <span>{{ draftSavedAt ? '草稿保存于 ' + draftSavedAt : '未保存草稿' }}</span>
+      </div>
+      <div class="submit-actions">
+        <el-button @click="handleCancel">取消</el-button>
+        <el-button @click="saveDraft">保存本地草稿</el-button>
+        <el-button @click="restoreDraft">恢复草稿</el-button>
+        <el-button type="primary" :loading="isSubmitting" @click="handleSubmit">
+          提交事件
+        </el-button>
+      </div>
+    </div>
+
+    <!-- Submission Success Dialog with Cross-Links -->
+    <el-dialog v-model="successModalVisible" title="业务事件已受理" width="min(560px,94vw)" :close-on-click-modal="false">
+      <div class="submit-success-box">
+        <div class="success-header">
+          <el-icon class="success-icon"><CircleCheckFilled /></el-icon>
+          <div class="header-text">
+            <h3>{{ schemaConfig.eventTypeName }} ({{ schemaConfig.eventType }})</h3>
+            <p>{{ submittedResult?.status || '已受理' }}</p>
+          </div>
+        </div>
+
+        <div class="info-table">
+          <div class="info-row"><span>事件全局 ID:</span> <b class="mono">{{ submittedResult?.eventId }}</b></div>
+          <div class="info-row"><span>事件内容摘要:</span> <span class="mono hash-text">{{ submittedResult?.payloadDigest || '-' }}</span></div>
+          <div class="info-row"><span>{{ isStaticMode() ? '模拟存证状态:' : '链上状态:' }}</span><el-button link @click="successModalVisible=false;router.push({path:'/trust/proofs',query:{subjectType:'EVENT',subjectId:submittedResult?.eventId}})">查看存证状态</el-button></div>
+        </div>
+
+        <div class="next-action-title">您接下来可以进行以下跨模块协同联动：</div>
+        <div class="next-action-buttons">
+          <el-button type="primary" @click="goToLineage">
+            在血缘图谱中展开该溯源节点 ➔
+          </el-button>
+          <el-button @click="goToEventDetail">
+            查看事件详情与原始报文
+          </el-button>
+          <el-button @click="goToSupply">
+            返回业务流程
+          </el-button>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="handleContinue">继续录入下一条</el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, reactive, computed, watch } from 'vue';
+import { useRouter, useRoute } from 'vue-router';
+import { isStaticMode, staticSchema, eventDefaults, nextId, now } from '@/stores/demoStore';
+import { ElMessage } from 'element-plus';
+import { CircleCheckFilled } from '@element-plus/icons-vue';
+import { useMetadataStore } from '@/stores/metadataStore';
+import StatusTag from '@/components/common/StatusTag.vue';
+import JsonEditor from '@/components/common/JsonEditor.vue';
+import EvidencePicker from '@/components/common/EvidenceReference.vue';
+import InspectionIndicatorGrid from '@/components/specialized/InspectionIndicatorGrid.vue';
+import PrescriptionItemGrid from '@/components/specialized/PrescriptionItemGrid.vue';
+import TraceCodeHierarchyInput from '@/components/specialized/TraceCodeHierarchyInput.vue';
+import { eventsApi } from '@/api/events';
+import { apiErrorMessage } from '@/api/client';
+
+const props = defineProps<{
+  eventType: string;
+}>();
+
+const router = useRouter();
+const route = useRoute();
+const metadataStore = useMetadataStore();
+
+const schemaConfig = computed(() => {
+  if (isStaticMode()) return staticSchema(props.eventType);
+  return metadataStore.getSchemaByType(props.eventType);
+});
+
+const formData = reactive<Record<string, any>>({
+  warehouseCode: 'WH-KM-001',
+  locationCode: 'A-03-08',
+  inboundNo: 'IN-20260808-0021',
+  inventoryUnitCode: 'INV-SQ-260731-08',
+  batchNo: 'SQ-260731-08',
+  traceCode: '693000260731080001',
+  quantity: 1200,
+  unitCode: 'kg',
+  medicalInsurancePieceCode: '8691234567890123',
+  qualityConclusion: 'QUALIFIED',
+  storageTemperature: 20.5,
+  tempSensorLocation: 'A区温湿度计-03',
+  cropBatchNo: 'CB-WS-2026-018',
+  baseCode: 'BASE-WS-01',
+  plotCode: 'A-16',
+  herbName: '三七',
+  species: '文山三七',
+  plantArea: 25,
+  areaUnit: '亩',
+  plantDate: '2026-03-12',
+  seedSource: '文山优选种苗中心'
+});
+
+const isSubmitting = ref(false);
+if (isStaticMode()) {
+  Object.assign(formData, eventDefaults(props.eventType, String(route.query.batchNo || route.query.sourceBatchNo || ''), String(route.query.prescriptionId || '')));
+  if (props.eventType === 'PLANTED') formData.batchNo = `CB-STATIC-${nextId()}`;
+  if (props.eventType === 'PRESCRIPTION_RECEIVED') { formData.prescriptionNoToken = `PRE-${nextId()}****`; delete formData.prescriptionId; }
+}
+const eventMeta=reactive({eventType:props.eventType,schemaVersion:'1.0.0',sourceBusinessKey:'',occurredAt:'',rawRecordId:'',useFactEngine:false});
+if (isStaticMode()) Object.assign(eventMeta, { sourceBusinessKey: `${props.eventType}-${nextId()}`, occurredAt: now() });
+const loadingSchema=ref(false);
+async function loadPublishedSchema(){loadingSchema.value=true;try{const snapshot=await eventsApi.getEventSchema(eventMeta.eventType,eventMeta.schemaVersion);const jsonSchema=JSON.parse(snapshot.schemaJson);const fields=Object.keys(jsonSchema.properties||{});const index=metadataStore.schemas.findIndex(s=>s.eventType===eventMeta.eventType);const config={eventType:snapshot.eventType,eventTypeName:snapshot.eventType,schemaVersion:snapshot.schemaVersion,status:snapshot.status,scenarioCode:'SUPPLY_CHAIN',groups:[{code:'BASIC',title:'业务数据',fields}],jsonSchema};if(index>=0)metadataStore.schemas.splice(index,1,config);else metadataStore.schemas.push(config);ElMessage.success('已加载发布版本');}catch(e){ElMessage.error(apiErrorMessage(e,'Schema 加载失败'));}finally{loadingSchema.value=false;}}
+const payloadText=ref(JSON.stringify(formData,null,2)), draftSavedAt=ref('');
+watch(formData,()=>{payloadText.value=JSON.stringify(formData,null,2);},{deep:true});
+function parsePayload(){const parsed=JSON.parse(payloadText.value);if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new Error('Payload 必须是 JSON 对象');return parsed as Record<string,unknown>;}
+
+const getFieldProperty = (key: string) => {
+  return schemaConfig.value.jsonSchema?.properties?.[key] || {};
+};
+
+const getFieldTitle = (key: string) => {
+  return getFieldProperty(key)?.title || key;
+};
+
+const isRequiredField = (key: string) => {
+  const req = schemaConfig.value?.jsonSchema?.required;
+  return Array.isArray(req) ? req.includes(key) : false;
+};
+
+const handleCancel = () => {
+  router.back();
+};
+
+const saveDraft = () => {
+  try { const payload=parsePayload();const sensitive=/token|password|secret|patient|credential|phone|identity/i;const redact=(value:any):any=>Array.isArray(value)?value.map(redact):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).filter(([key])=>!sensitive.test(key)).map(([key,item])=>[key,redact(item)])):value;sessionStorage.setItem(`tcmirp_event_draft_${props.eventType}`,JSON.stringify({payload:redact(payload),schemaVersion:eventMeta.schemaVersion,eventType:eventMeta.eventType}));draftSavedAt.value=new Date().toLocaleTimeString();ElMessage.success('脱敏草稿已保存至当前会话'); } catch { ElMessage.error('草稿保存失败，请检查 JSON'); }
+};
+
+const successModalVisible = ref(false);
+function restoreDraft(){try{const raw=sessionStorage.getItem(`tcmirp_event_draft_${props.eventType}`);if(!raw){ElMessage.info('暂无草稿');return;}const draft=JSON.parse(raw);Object.assign(formData,draft.payload);payloadText.value=JSON.stringify(formData,null,2);eventMeta.schemaVersion=draft.schemaVersion;ElMessage.success('草稿已恢复');}catch{ElMessage.error('草稿无法读取');}}
+const submittedResult = ref<any>(null);
+
+const handleSubmit = async () => {
+  try {
+    const payload = parsePayload();
+    const missing = (schemaConfig.value.jsonSchema?.required || []).filter((key: string) => payload[key] == null || payload[key] === '');
+    if (missing.length) { ElMessage.warning('请填写：' + missing.map(getFieldTitle).join('、')); return; }
+  } catch { ElMessage.warning('请检查 Payload JSON'); return; }
+  if(!eventMeta.eventType.trim()||!eventMeta.schemaVersion.trim()||!eventMeta.sourceBusinessKey.trim()||!eventMeta.occurredAt||(eventMeta.rawRecordId&&!/^\d+$/.test(eventMeta.rawRecordId))){ElMessage.warning('请填写事件类型、版本、唯一业务键和时间，原始记录 ID 须为数字字符串');return;}
+  isSubmitting.value = true;
+  try {
+    const res = await eventsApi.submitEvent({
+      ...eventMeta, payload: parsePayload()
+    });
+    submittedResult.value = res;
+    successModalVisible.value = true;
+  } catch (err: any) {
+    ElMessage.error(apiErrorMessage(err, '提交失败，请稍后重试'));
+  } finally {
+    isSubmitting.value = false;
+  }
+};
+
+const goToLineage = () => {
+  successModalVisible.value = false;
+  router.push(`/trust/lineage?eventId=${submittedResult.value?.eventId || 'EVT-20260808-001'}`);
+};
+
+const goToEventDetail = () => {
+  successModalVisible.value = false;
+  router.push(`/trust/events/${submittedResult.value?.eventId || 'EVT-20260808-001'}`);
+};
+
+const goToSupply = () => {
+  successModalVisible.value = false;
+  const destinations: Record<string, string> = { PLANTED:'/business/field',FARMING_OPERATION:'/business/field',INPUT_APPLIED:'/business/field',HARVESTED:'/business/process-quality',PRIMARY_PROCESSED:'/business/process-quality',QUALITY_INSPECTED:'/business/coding',TRACE_CODE_ASSIGNED:'/business/supply',ORDER_CONFIRMED:'/business/supply',WAREHOUSED:'/business/supply',OUTBOUND_COMPLETED:'/business/supply',DELIVERY_COMPLETED:'/business/decoction',PLEDGE_CONFIRMED:'/business/supply',PRESCRIPTION_RECEIVED:'/business/decoction',DECOCTION_PROCESSED:'/business/decoction',DECOCTION_DELIVERED:'/trust/lineage' };
+  router.push({ path: destinations[props.eventType] || '/business/supply', query: { batchNo: submittedResult.value?.payload?.batchNo || formData.batchNo } });
+};
+
+const handleContinue = () => {
+  successModalVisible.value = false;
+  if (isStaticMode() && props.eventType === 'PLANTED') formData.batchNo = `CB-STATIC-${nextId()}`;
+  if (isStaticMode() && props.eventType === 'PRESCRIPTION_RECEIVED') { formData.prescriptionNoToken = `PRE-${nextId()}****`; delete formData.prescriptionId; }
+  eventMeta.sourceBusinessKey=isStaticMode()?`${props.eventType}-${nextId()}`:'';eventMeta.occurredAt=isStaticMode()?now():'';eventMeta.rawRecordId='';
+  ElMessage.info('已重置录入，您可以继续提交下一条事件数据。');
+};
+</script>
+
+<style scoped>
+.event-context-form{margin:18px 0;padding:16px 0;border-top:1px solid var(--color-border)}
+.schema-form-wrapper {
+  padding-bottom: 70px;
+}
+
+.anchor-nav-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 10px 16px;
+  margin-bottom: 14px;
+}
+
+.nav-links {
+  display: flex;
+  gap: 16px;
+}
+
+.anchor-link {
+  color: var(--color-muted);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.anchor-link:hover {
+  color: var(--color-brand);
+}
+
+.schema-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.version-text {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.form-layout-grid {
+  display: grid;
+  grid-template-columns: 1fr 310px;
+  gap: 14px;
+}
+
+.form-sections-col {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.form-card-section {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.section-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: #f7f9f8;
+}
+
+.section-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+
+.fields-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+  padding: 16px;
+}
+
+.field-item {
+  display: flex;
+  flex-direction: column;
+}
+
+.field-item.full-width {
+  grid-column: 1 / -1;
+}
+
+.field-item label {
+  font-size: 12px;
+  color: var(--color-muted);
+  margin-bottom: 6px;
+}
+
+.req-star {
+  color: var(--color-danger);
+  font-style: normal;
+  margin-right: 2px;
+}
+
+.evidence-side-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.side-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 14px;
+}
+
+.side-card-title {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.side-notice {
+  border: 1px solid #e8d1af;
+  background: #fff8ed;
+  color: #76501b;
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.side-notice code {
+  background: #f1dfc5;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.fixed-submit-bar {
+  position: fixed;
+  left: 236px;
+  right: 20px;
+  bottom: 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px 6px 0 0;
+  padding: 12px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  z-index: 100;
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+}
+
+.draft-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.dot-green {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-success);
+}
+
+.submit-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.submit-success-box {
+  padding: 6px 0;
+}
+
+.success-header {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.success-icon {
+  font-size: 32px;
+  color: var(--color-success);
+  margin-top: 2px;
+}
+
+.header-text h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.header-text p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-muted);
+  line-height: 1.5;
+}
+
+.info-table {
+  background: #f8faf8;
+  border: 1px solid #e1ece4;
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin-bottom: 18px;
+}
+
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px solid #edf3ef;
+}
+
+.info-row:last-child {
+  border-bottom: none;
+}
+
+.info-row span {
+  color: var(--color-muted);
+}
+
+.hash-text {
+  font-size: 11px;
+  color: var(--color-brand);
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.next-action-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 10px;
+}
+
+.next-action-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.next-action-buttons .el-button {
+  justify-content: flex-start;
+  padding-left: 14px;
+}
+@media (max-width: 800px) {
+  .schema-form-wrapper { padding-bottom:150px; }
+  .form-layout-grid, .fields-grid { grid-template-columns:minmax(0,1fr); }
+  .form-sections-col, .evidence-side-panel, .field-item { min-width:0; }
+  .anchor-nav-bar, .nav-links { flex-wrap:wrap;gap:8px; }
+  .fixed-submit-bar { left:8px;right:8px;padding:8px;flex-wrap:wrap;gap:6px; }
+  .submit-actions { display:flex;flex-wrap:wrap;gap:4px; }
+  .submit-actions .el-button { margin-left:0; }
+  .field-item.full-width { overflow-x:auto; }
+  .field-item.full-width :deep(table) { min-width:650px; }
+}
+</style>

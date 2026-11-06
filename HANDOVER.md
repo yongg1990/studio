@@ -1,0 +1,363 @@
+# 项目交接文档
+
+## 2026-10-19 编辑失败原因与处理规则
+
+- 本次重复编辑失败发生于 `src/config/pageApiRegistry.ts`。请求在一次 `apply_patch_batch` 中同时对同一路径执行 `delete_file` 和 `add_file`，工具返回 `invalid patch: multiple operations target ...`，补丁在写入前被拒绝，原文件未改变。
+- 根因是补丁请求构造错误，不是 Vue/TypeScript 语法、中文路径、Windows 文件权限或 Swagger 网络问题。2026-09-29 的交接记录已经说明过同一限制，但上轮没有遵守，且连续重复提交相同无效补丁，造成任务中断。
+- 后续同一文件每批只提交一个 `apply_patch_update_file` 操作，不通过同批删除再新增实现。整文件替换入口也可能被工具包装成 Delete + Add，本轮又触发过一次，因此本项目手工编辑优先采用局部更新。上下文不匹配时先读取实际内容再缩小范围，不原样重试。
+- 另一个已确认原因是更新片段顺序错误：工具按文件位置顺序匹配多个 hunk，倒序或重叠片段会报 expected lines/context not found，即使目标文字存在。hunk 必须按原文件从上到下排列；同一批不要先新增文本再以它作为后续修改目标。失败原子拒绝，不代表文件被部分写坏。
+- 排查流程：区分工具补丁格式错误、上下文匹配错误和代码错误；前两类先纠正补丁结构，不能靠反复提交相同请求解决。
+- 上轮只新增了 `src/config/apiContract.ts` 并部分修改请求拦截器，页面注册清单仍是旧版，不能把当时状态视为重新对接完成。本轮在这些未完成改动上继续；`src/api/governance.ts` 的原有用户修改须保留。
+
+## 2026-10-19 最新接口对接摘要
+
+> 本节优先于下方历史记录。契约来源为本次读取的实时 `/api/tcmirp/v3/api-docs`，不再按旧版接口全集判断是否对接。
+
+### 本次范围与标记
+
+- 仅接入 Swagger 分组 description 明确含“可对接”的 19 组。APP-01：登录认证、租户与访问控制、用户与角色、角色、权限、通用字典、项目空间；APP-02：主体管理、业务对象管理、饮片品种管理、监管编码体系管理；APP-03：来源系统管理、来源系统密钥管理、对接助手、数据元管理、值域管理；APP-04：事件类型配置、事件 Schema 管理、事件类型授权。
+- `src/config/apiContract.ts` 是本次允许的 method/path 清单；`src/config/pageApiRegistry.ts` 按分组生成 15 个管理页面的接口标记及端点说明，保留原 PageHeader 标记样式。侧栏元数据也从该注册清单取值。登录保留实际登录端点展示。
+- 移除工作台、业务场景/通用事件录入、批次/原始记录、字段映射、治理案卷、标识命名空间/标识绑定、可信事件/血缘/证据/文件/存证、交换规范/查询/投影、部署实例、订阅任务、审计告警等范围外页面的对接标记。保留页面和历史代码，不删除用户功能。
+- 默认真实后端模式。允许分组始终请求后端，失败不自动回退为模拟成功；不允许的端点不会发往后端。显式静态模式只对范围外模块保留原演示适配。页面标记表示代码按契约接入，不表示已完成登录联调。
+
+### 契约调整
+
+- 登录按 username/password 提交，保留已有 RSA 加密；按 token/userId/tenantId/expiresIn 解析响应，不编造角色/租户资料，tenantId 为空保留平台用户语义。移除登录租户必选和预置体验账号。退出请求不再虚构服务端成功；本地退出仍清理会话。
+- 请求上下文不再默认注入租户/项目/来源 ID 1；缺失上下文时省略对应请求头，登录不带旧账号上下文。切换登录账号和退出清理项目与来源选择。Navbar 项目入口改为管理真实项目空间，不再切换到虚构 PRJ ID。
+- 用户 tenantId 可选且字符串传递；角色绑定/解除发送 roleIds 字符串数组，tenantId 为可选查询参数。角色列表按每页 200 继续获取完整选项。租户选择使用新增 `/tenant-access/tenants/permitted`；来源密钥页使用 `/openapi/v1/source-systems/tenant` 按租户加载来源选项，保留当前租户与管理员代生成两类接口。
+- 权限树使用 `/permissions/tree`；角色赋权按服务端嵌套 children/granted 递归展示及回填，保存最终 permissionCodes 集合。补齐权限创建入口；parentId 保持字符串，创建时不发送修改专用 status 字段。
+- 项目 BusinessScope 只包含 scenarioCodes/regionCodes，移除旧 partyIds/objectTypes，并修正空数组为“无授权范围”的语义。
+- 编码体系新增必填语义版本 version，展示 contentDigest/publishedAt，试校验允许指定 version；饮片创建只依赖 productId 返回值。主体、业务对象、饮片的正式分页/详情/创建/更新接口保留并按当前契约接入。
+- 来源系统注册仅要求 code/name/type/status；ownerPartyId 等字段按文档可选，更新仍要求 ownerPartyId 与 lockVersion。`governance.ts` 在原有用户修改上增量调整，没有回滚原改动。
+- 数据元详情、约束字段、锁版本更新/启停已接入；值域及代码项编辑先取详情，代码不可变。补齐有效代码项查询及 attributes JSON 编辑，保留 validFrom/validTo；值域/代码项不发送文档没有的 lockVersion。
+- 事件类型补齐详情、PUT 更新、PATCH 启停及乐观锁。Schema 按 summary/detail 区分取值，查看展示完整 fields/referenceRules；已保存测试和发布无请求体，新增当前未保存草稿测试入口，提交完整 eventType/schemaVersion/fields/referenceRules。
+- 来源密钥、对接助手、事件类型授权沿用本项目已有页面与接口模块，并纳入最新分组清单。密钥创建返回 `{ key }`，只展示公开信息；授权保存为完整目标集合，对接助手校验不提交事件。
+
+### 本次执行边界
+
+- 按用户要求未运行打包、lint、测试、浏览器验证或启动命令；没有新增独立日志文件。
+- 未使用真实账号进行认证后的端到端联调，不能宣称业务验收通过。下方历史“检查通过/端口运行”等结论仅属于对应历史轮次，本轮不复用这些结论。
+- 后续接口更新仍应读取实时 Swagger，先按分组“可对接”筛选，再同步契约清单、API 模块及页面标记，不把未标注接口恢复为正式对接。
+
+
+## 1. 文档信息
+
+- 文档版本：v1.7.0
+- 最近更新：2026-10-19
+- 项目目录：[96mF:\codex\gitHub\hutong[0m
+- 接口文档：线上 Swagger（实时 OpenAPI）http://192.168.1.39/api/tcmirp/swagger-ui/index.html#/
+- OpenAPI JSON：http://192.168.1.39/api/tcmirp/v3/api-docs
+
+## 2026-09-28 当前交接摘要
+
+### 本轮完成
+
+- 主体和标识绑定增加分页、按 ID 详情、编辑；详情为抽屉，编辑为弹框。项目空间和部署实例请求路径已改为 `/openapi/v1/project-spaces`、`/openapi/v1/deployment-instances`。
+- 新增文件上传与凭证页 `/trust/files-credentials`：上传会话创建/查询、短时 URL 传文件、完成确认、文件元数据查询、凭证登记与按 ID 查询。对象存储签名、PUT/POST 方法、CORS、分片及对象版本仍需真实环境联调。
+- 新增互通规范配置页 `/exchange/profile-config`：版本草稿、测试、发布，数据集、字段规则、一致性用例和项目绑定的创建/修改及关联查询；新增交换数据查询页 `/exchange/queries`：对象、事件、事件状态和已发布元数据定向查询。
+- 存证页增加任务创建、处理、重试、对账；投影页增加按 ID 查询、详情、输出下载、补偿处理；订阅页增加创建订阅、回调查询及重放；告警页增加按真实 ID 和锁版本执行 ACK/CLOSE。作业与告警列表仍为演示数据，通用作业触发入口已禁用。
+- 事件录入增加类型/版本、唯一来源业务键、发生时间、Payload JSON、发布 Schema 加载和预检。事件写请求失败不再返回模拟成功，受理结果不再宣称链上确认。追溯码登记需真实批次及包装单元 ID，不再使用硬编码 ID。
+- 证据页提供文件上传入口；本轮触及的事件、证据、血缘、存证、投影大整数 ID 保持字符串传递。业务工作台的演示清单加提示，田间、供销、代煎事件入口补齐。页面接口标记改为按已发布契约接入，不宣称完成联调。
+- 小白文档 `项目介绍与逐页操作手册.md` 包含项目总览、逐页用途及操作步骤。`项目介绍与页面差距清单.md` 保留为此前静态盘点，不能替代当前操作手册。
+
+### 关键文件与契约
+
+- API：`src/api/client.ts` 的 `swaggerEndpointPatterns` 是正式端点白名单；本轮还涉及 `masterData.ts`、`settings.ts`、`events.ts`、`trust.ts`、`exchange.ts`、`coding.ts`，新增 `exchangeConfig.ts`、`extendedServices.ts`。新增端点须同步核对方法、路径、参数和白名单。
+- 导航及接口说明：`src/router/index.ts`、`src/components/layout/Sidebar.vue`、`src/config/pageApiRegistry.ts`、`src/components/common/PageHeader.vue`。新增页面：`src/pages/trust/FilesCredentials.vue`、`src/pages/exchange/ProfileConfig.vue`、`src/pages/exchange/Queries.vue`。新增组件：`UploadSessionTransfer.vue`、`EvidenceReference.vue`。
+- 本地上下文使用 `tcmirp_tenant_id`、`tcmirp_project_space_id`、`tcmirp_source_system_id`、`tcmirp_purpose_code`；`tcmirp_project_id` 仅作兼容。Swagger 中雪花 ID 多为数字字符串，页面不能用 `Number()` 处理这些 ID。
+
+### 限制与后续工作
+
+1. 尚未用真实账号完成端到端联调。优先在真实租户/项目/来源系统上下文中检查上传及对象存储、规范版本测试/发布、投影生成、存证、回调重放和告警锁版本。静态接入不等于业务验收。
+2. Swagger 未发布工作台统计/待办、来源系统/批次/事件/证据等通用列表、治理案卷/数据元值域管理、订单库存查询、通用作业及审计列表。相应页仍可能含本地演示/参考数据，不得伪称后端全量记录；后端提供契约后再补正式查询。
+3. 部分老 API/页面仍有本地回退或示例数据。接手时逐个区分真实写入、按 ID 查询和演示清单；不要把事件受理、内容摘要、文件传输完成解释为链上确认。
+4. 下方历史记录有过时路径和能力描述，以本摘要、当前代码和实时 `/v3/api-docs` 为准，不要直接照抄旧表。
+
+### 检查与工作区
+
+- 上轮 `npm run lint`（`tsc --noEmit`）、修改过的 Vue 单文件组件语法检查、`git diff --check` 均通过；未执行打包。此结果不代表浏览器操作或后端联调通过。
+- 2026-09-28 检查时 3000 端口已有本项目 Vite 服务，`http://localhost:3000/` 返回 200；未另起服务。下次启动前先检查端口占用。
+- 当前工作区的代码改动及两份中文文档尚未提交，包含未跟踪新页面、接口模块和组件。勿清理、覆盖或回滚这些文件。未安排时不要执行打包，不要把输出写到独立日志文件。
+
+## 2. 本次交接范围
+
+> 注意：第 2-12 节为此前各轮历史记录，保留供追溯；其中旧 `/admin/v1/project-spaces`、`/admin/v1/deployment-instances`、主体/绑定仅支持写入、未执行 lint 等说法已不代表当前状态。请先阅读上方“2026-09-28 当前交接摘要”，再以实时 OpenAPI 和当前代码核对。
+
+本次工作依据线上 Swagger 的实时 OpenAPI 定义完成相关页面和业务接口的对接与调整。不要再使用本地 jk.txt 作为接口契约；接口变更必须重新读取 /api/tcmirp/v3/api-docs。登录接口此前已验证可用，本次未修改 src/api/auth.ts。
+
+主要完成内容：
+
+- 接入租户、用户、权限、规范包等正式列表接口。
+- 项目空间页面已按 APP-01 正式分页接口展示列表，并支持按 ID 查询详情、创建、编辑和启停。
+- 接入证据登记、存证状态查询、验真和血缘查询。
+- 接入田间、质检、赋码、供销、代煎和主数据等业务写接口。
+- 新增供应链事件统一接口模块，覆盖 15 类业务事件。
+- 根据接口返回补充列表表头；页面已有但接口无对应字段的表头追加 `*[0m。
+- 查询条件已按各查询接口实际支持的参数调整。
+
+## 3. 关键目录与文件
+
+`+src/
+├─ api/
+│  ├─ auth.ts                  # 登录接口，本次未修改
+│  ├─ client.ts                # API 请求、正式接口识别及本地 fallback
+│  ├─ events.ts                # 事件相关接口
+│  └─ supplyChain.ts           # 供应链业务事件接口
+├─ config/
+│  └─ pageApiRegistry.ts       # 页面与接口注册配置
+├─ pages/                      # 业务页面
+└─ utils/                      # 通用工具（存在未跟踪内容，勿误删）
+[0m
+
+继续增加或修改正式接口时，需要同步检查 `src/api/client.ts[0m 中的 `swaggerEndpointPatterns[0m，避免正式接口被错误识别为未发布接口并走本地 fallback。
+
+## 4. 接口调用约定
+
+### 4.1 上下文请求头
+
+当前业务请求头仍携带数字格式的上下文 ID；业务请求体和响应中的大整数 ID 按线上 Swagger 定义使用数字字符串，主要请求头如下：
+
+`http
+X-Tenant-Id: <tenantId>
+X-Project-Id: <projectId>
+X-Project-Space-Id: <projectSpaceId>
+X-Source-System-Id: <sourceSystemId>
+[0m
+
+投影创建接口还需携带：
+
+`http
+X-Purpose-Code: EXCHANGE_OUTPUT
+[0m
+
+不要再使用租户名称、租户编码或项目编码替代上述数字 ID。
+
+### 4.2 正式列表接口
+
+接口文档中明确支持列表查询的主要接口如下：
+
+| 业务 | 方法与路径 | 查询参数 |
+| --- | --- | --- |
+| 租户列表 | `GET /tenant-access/tenants[0m | `tenantName[0m、`page[0m、`size[0m |
+| 用户列表 | `GET /tenant-access/users[0m | `tenantId[0m |
+| 权限列表 | `GET /tenant-access/permissions[0m | 以接口定义为准 |
+| 规范包列表 | `GET /exchange-query/profiles[0m | `profileCode[0m、`limit[0m |
+
+查询表单只能提供接口实际支持的查询条件，后续接口参数有变化时应同步调整页面查询项和请求参数映射。
+
+### 4.3 仅支持按 ID 查询的接口
+
+下列接口在当前文档中未提供列表查询能力，对应页面已按 ID 查询处理：
+
+| 业务 | 方法与路径 |
+| --- | --- |
+| 项目空间 | `GET /admin/v1/project-spaces/{id}[0m |
+| 部署实例 | `GET /admin/v1/deployment-instances/{id}[0m |
+| 事件 | `GET /openapi/v1/event-fact/events/{id}[0m |
+| 证据 | `GET /openapi/v1/evidence/{id}[0m |
+| 投影 | `GET /exchange-query/projections/{id}[0m |
+
+在后端补充正式列表接口前，不要从按 ID 接口推断或拼装列表请求。
+
+## 5. 页面字段与查询规则
+
+列表页面按以下规则维护：
+
+1. 查询接口返回字段存在、页面未展示时，补充对应表头和单元格展示。
+2. 页面已有表头、接口响应无对应字段时，在表头文字后追加 `*[0m，表示该字段目前没有接口数据支撑。
+3. 查询条件、参数名称和参数类型必须与列表查询接口一致，不保留接口不支持的筛选条件。
+4. 字段映射优先使用接口原始字段；确需格式化时保留空值处理，避免将无返回误显示为有效数据。
+5. 接口文档新增字段或列表能力后，应同步移除已获得接口支撑字段上的 `*[0m。
+
+## 6. 投影、证据与存证
+
+### 6.1 投影
+
+- 创建投影时使用 `X-Purpose-Code: EXCHANGE_OUTPUT[0m。
+- 投影查询支持 `projectSpaceId[0m、`purposeCode[0m、`includeOutput[0m、`includeValidationDetails[0m。
+- 页面查询项和布尔值传参需与上述参数保持一致。
+
+### 6.2 存证与验真
+
+- 存证状态查询：`GET /openapi/v1/proofs/{subjectType}/{subjectId}[0m
+- 存证验真：`POST /openapi/v1/proofs/verify[0m
+- 证据登记、证据查询及血缘查询已按接口文档接入。
+
+## 7. 供应链业务事件
+
+`src/api/supplyChain.ts[0m 统一维护以下 15 类供应链业务事件端点：
+
+| 业务事件 | 接口路径 |
+| --- | --- |
+| 入库 | `/supply-chain/warehouse-receipts[0m |
+| 出库 | `/supply-chain/warehouse-issues[0m |
+| 追溯码赋码 | `/supply-chain/trace-code-assignments[0m |
+| 供销订单 | `/supply-chain/supply-orders[0m |
+| 供销交付 | `/supply-chain/supply-deliveries[0m |
+| 质量检验 | `/supply-chain/quality-inspections[0m |
+| 初加工 | `/supply-chain/primary-processes[0m |
+| 处方 | `/supply-chain/prescriptions[0m |
+| 质押 | `/supply-chain/pledges[0m |
+| 种植 | `/supply-chain/plantings[0m |
+| 投入品使用 | `/supply-chain/input-applications[0m |
+| 采收 | `/supply-chain/harvests[0m |
+| 农事操作 | `/supply-chain/farming-operations[0m |
+| 代煎过程 | `/supply-chain/decoction-processes[0m |
+| 代煎交付 | `/supply-chain/decoction-deliveries[0m |
+
+田间、质检、赋码、供销、代煎和主数据相关写操作均应调用正式接口，不再仅更新页面本地状态。
+
+## 8. 本地状态键
+
+当前上下文主要通过以下本地存储键维护：
+
+| 键 | 含义 |
+| --- | --- |
+| `tcmirp_tenant_id[0m | 当前租户 ID |
+| `tcmirp_project_space_id[0m | 当前项目空间 ID |
+| `tcmirp_source_system_id[0m | 当前来源系统 ID |
+| `tcmirp_purpose_code[0m | 当前用途代码 |
+| `tcmirp_project_id[0m | 兼容旧版本的项目 ID 键 |
+
+`tcmirp_project_id[0m 仅用于兼容旧数据，新代码应优先使用项目空间相关上下文键。
+
+## 9. 已知限制与维护注意事项
+
+- OpenAPI 文档仍未提供列表接口的页面，会继续保留本地基准数据或使用按 ID 查询；项目空间已例外接入正式分页列表。
+- `apiCall[0m 对未发布接口保留本地 fallback；登录接口不走 fallback，登录失败应直接反馈真实接口错误。
+- 正式接口路径变化时，需要同步更新 `src/api/client.ts[0m 的 `swaggerEndpointPatterns[0m。
+- 带 `*[0m 的表头表示当前接口无对应返回字段，不代表字段必填。
+- 工作区原有未跟踪内容包括 `.idea/[0m、`src/utils/[0m 和 `yarn.lock[0m，后续处理版本控制时不要误删或回滚。
+
+## 10. 本轮验证记录
+
+本轮完成了接口代码与页面字段、查询条件的对接，但按照任务约束未执行构建、打包、测试、lint 或项目启动命令。因此本文档不声明上述检查已通过，后续需要验证时应根据项目现有脚本单独执行。
+
+## 11. 2026-09-17 接口对接更新
+
+当前 Swagger：http://192.168.1.39/api/tcmirp/swagger-ui/index.html#/ 。本节以当前代码为准，补充前文交接后的租户、用户、角色与权限页面。主要文件：`src/api/rbac.ts`、`src/api/client.ts`、`src/pages/settings/Tenants.vue`、`src/pages/settings/Users.vue`、`src/pages/settings/Roles.vue`。默认 API 基础路径为 `/api/tcmirp`，开发代理指向 `http://192.168.1.39`；浏览器 `tcmirp_api_base` 可覆盖默认路径。
+
+### 11.1 租户管理（`/settings/tenants`）
+
+| 页面时机 | 接口 | 说明 |
+| --- | --- | --- |
+| 进入、刷新、查询、重置、翻页 | `GET /tenant-access/tenants` | 服务端分页，仅传 `tenantName`、`page`、`size` |
+| 详情 | `GET /tenant-access/tenants/{id}` | 按 ID 查询 |
+| 新增 | `POST /tenant-access/tenants` | 名称、类型、可选编码 |
+| 编辑、启用或停用 | `POST /tenant-access/tenants/{id}/update` | 名称、类型、状态 |
+| 删除 | `GET /tenant-access/tenants/{id}/delete` | 成功后刷新列表 |
+
+租户页不再以本地样例代替正式接口错误；联系人、资质、管理员、配额不在当前接口模型中，已从页面移除。行操作“冻结”已改为“停用”。
+
+### 11.2 角色与权限（`/settings/roles`）
+
+| 页面时机 | 接口 | 说明 |
+| --- | --- | --- |
+| 进入、刷新、创建角色或保存授权后 | `GET /tenant-access/roles`、`GET /tenant-access/permissions` | 列表与权限字典数量 |
+| 查询、重置 | 无新增请求 | 角色编码/名称在已加载列表中本地筛选，重置恢复全部 |
+| 创建角色 | `POST /tenant-access/roles/tenant` | 可选 `tenantId` query |
+| 打开配置功能权限 | `GET /tenant-access/roles/{roleId}/permissions` | 根据 `granted` 初始化勾选 |
+| 保存权限配置 | `POST /tenant-access/roles/{roleId}/permissions` | 提交最终 `permissionCodes` 数组 |
+
+权限项创建、修改、删除接口虽在 API 模块和页面注册配置中列出，当前页面没有入口，也不会调用。当前 Swagger 无角色编辑、删除接口，页面未展示相应操作。
+
+### 11.3 用户管理（`/settings/users`）
+
+| 页面时机 | 接口 | 说明 |
+| --- | --- | --- |
+| 进入、刷新、按租户查询、重置 | `GET /tenant-access/users`、`GET /tenant-access/tenants`、`GET /tenant-access/roles` | 用户查询仅支持 `tenantId`，其余提供选择项 |
+| 创建用户 | `POST /tenant-access/users` | 租户 ID、账号、显示名称、RSA 加密密码 |
+| 创建后绑定初始角色 | `POST /tenant-access/users/{userId}/roles` | 独立于用户创建请求 |
+| 打开绑定或解除弹框 | `GET /tenant-access/roles` | 每次重新获取；有租户 ID 时显示同租户及平台角色，空租户时显示全部 |
+| 确认绑定 | `POST /tenant-access/users/{userId}/roles` | 多选，当前请求体为 `{ roleId: number[] }`；非空租户 ID 作为 query |
+| 确认解除 | `GET /tenant-access/users/{userId}/roles/{roleId}/delete` | 单角色，当前页面要求非空租户 ID |
+
+用户编辑、删除、重置密码及状态切换没有正式接口，页面未展示入口。接口没有提供用户已绑定角色列表，解除弹框目前无法只展示已绑定项。
+
+### 11.4 契约差异与风险
+
+- 当前 Swagger 的 `UserRoleBindRequest` 定义 `roleId` 为单个 `int64`，且 `tenantId` query 必填；前端按后续需求提交数组，空租户时省略 query。后端支持情况尚未确认，联调前需同步契约。
+- 2026-09-18 实时 Swagger 已将多数大整数 ID 定义为数字字符串；相关页面按字符串接收、显示和传参，避免 JavaScript 安全整数精度损失。仍定义为 JSON 数字的旧接口需逐项核对。
+- `rbac.ts` 仍有部分未被页面调用的本地演示方法，不代表正式接口已接通。本轮只更新文档；未执行打包、测试、lint、项目启动或页面联调。
+
+### 11.5 接入与治理（APP-03）
+
+依据线上 Swagger 的 `APP-03 来源接入与数据治理` 调整了 `src/api/governance.ts`、`src/pages/governance/Sources.vue`、`Batches.vue`、`Mappings.vue`、`Cases.vue`、`Standards.vue` 及 `src/config/pageApiRegistry.ts`。该分组目前只有以下五个写接口；批次按 ID 查询属于 APP-08，但接入批次页一并使用。
+
+| 页面与操作 | 接口 | 当前行为 |
+| --- | --- | --- |
+| 来源系统注册 | `POST /openapi/v1/source-systems` | 提交来源代码、名称、类型、主体 ID、接入方式、签名配置、信任级别、用途代码和状态；注册成功后把返回 ID 写入 `tcmirp_source_system_id` |
+| 创建接入批次 | `POST /openapi/v1/batches` | 提交批次编码、来源系统 ID、映射配置、文件 ID、业务用途和处理策略；受理后用返回的 `batchId` 查询 |
+| 查询接入批次 | `GET /openapi/v1/batches/{batchId}`（APP-08） | 仅按 ID 查询；`includeFailures`、`pageNo`、`pageSize` 为查询参数，失败明细显示接口返回的 `lineNo`、`code`、`fieldPath`、`ruleCode`、`message` |
+| 留存原始记录 | `POST /openapi/v1/raw-records` | 提交项目空间 ID、来源系统 ID、来源业务键、内容类型及原始内容或文件片段引用；返回 `rawRecordId` 可用于重放 |
+| 重放原始记录 | `POST /openapi/v1/raw-records/{rawRecordId}/replays` | `mappingVersion` 和 `reason` 作为必填 query 参数；不能用批次 ID 代替原始记录 ID |
+| 字段映射预检 | `POST /openapi/v1/mappings/test` | 页面输入映射代码/版本、来源系统 ID、目标事件/Schema 版本及 JSON 对象样例，固定 `dryRun: true`，展示映射响应和 `issues` |
+
+来源系统接口没有列表、详情、启停接口；页面只显示当前页面注册成功的结果，刷新后不会保留。批次接口没有列表能力，未填写任务 ID 时不请求也不显示示例批次。正式 APP-03 写请求不走 `apiCall` 的模拟成功 fallback，错误由页面反馈。
+
+治理异常案卷、数据元与值域在 APP-03 没有查询或管理接口；页面明确标注本地参考数据。事件与 Schema 配置页面属于 APP-04，已按线上 Swagger 接入创建事件类型、创建 Schema 草稿、测试、发布和按事件类型/版本查询。`src/api/client.ts` 已识别上述正式路径；后端增加列表或管理接口时需同步更新接口白名单与页面。
+
+本次仅核对 Swagger 和代码并更新页面、接口及本文档，未执行打包、测试、lint、启动或页面联调；实际业务参数、鉴权及响应仍待环境联调。
+
+### 11.6 2026-09-18 实时 Swagger 修订
+
+- 本项目接口契约的唯一来源改为 `http://192.168.1.39/api/tcmirp/v3/api-docs`，Swagger UI 仅用于浏览；本地 `jk.txt` 不再作为对接依据。
+- APP-03 的 `ownerPartyId`、`projectSpaceId`、`batchId`、`sourceSystemId`、`fileId`、`expectedRecordCount`、`rawRecordId`、`replayId` 及治理票据 ID 均按数字字符串处理。
+- `EventTypeRequest` 的名称字段为 `eventName`，不是 `name`；事件类型页面和 API 类型已同步调整。
+- `MappingIssue` 字段为 `fieldPath`、`ruleCode`、`errorCode`、`message`，页面已按实时模型展示。
+- APP-03 仍未提供来源系统列表、批次列表、治理案卷、数据元和值域管理接口；这些页面不得虚构正式查询或保存能力。
+- 2026-09-18 实时 Swagger 已将多数大整数 ID 定义为带 `^-?[0-9]+$` 约束的字符串；接入与治理页面不得再使用 `el-input-number` 或 `Number(...)` 转换这些 ID。
+
+### 11.7 主数据中心（APP-02）
+
+主数据中心已按实时 Swagger 增加或调整为四个独立入口：主体、标识命名空间、业务对象登记、标识绑定。对应接口如下：
+
+| 页面 | 接口 | 页面行为 |
+| --- | --- | --- |
+| 主体 | `POST /openapi/v1/parties` | 提交主体类型、名称、行政区划编码及扩展属性 JSON 字符串，展示 `partyId`、`status` |
+| 标识命名空间 | `GET/POST /openapi/v1/identifiers/namespaces`、`GET/POST /openapi/v1/identifiers/namespaces/{id}` | 支持分页查询、新增、详情和携带 lockVersion 的编辑 |
+| 业务对象登记 | `POST /openapi/v1/business-objects` | 项目空间 ID、所有者主体 ID 均按数字字符串提交；动态属性按 JSON 字符串提交，展示 `objectId`、`versionNo` |
+| 标识绑定 | `POST /openapi/v1/identifiers/resolve`、`GET/POST /openapi/v1/identifiers/bindings` | 支持先解析再自动回填目标 ID，也支持从歧义候选中选取目标后绑定；生效时间按 `yyyy-MM-dd HH:mm:ss` 提交 |
+
+主体、业务对象当前仍只提供写入接口；标识命名空间和标识绑定已提供正式分页查询能力。`src/api/client.ts`、页面接口注册配置和主数据接口模块均已同步 APP-02 实时路径。本次未执行打包、测试、lint、项目启动或页面联调。
+
+### 12.1 2026-09-21 标识命名空间页面重做
+
+标识命名空间页面已按 APP-02 实时 Swagger 的“标识管理”资源重做为分页工作台，正式端点如下：
+
+| 页面操作 | 接口 |
+| --- | --- |
+| 查询列表 | GET /openapi/v1/identifiers/namespaces，支持 namespaceCode、namespaceName、targetType、status、page、size |
+| 新增 | POST /openapi/v1/identifiers/namespaces |
+| 查看详情 | GET /openapi/v1/identifiers/namespaces/{id} |
+| 编辑 | POST /openapi/v1/identifiers/namespaces/{id}，提交 lockVersion 乐观锁版本 |
+
+页面文件为 src/pages/masterdata/IdentifierNamespaces.vue，接口方法位于 src/api/masterData.ts。旧的 /openapi/v1/identifier-namespaces 不再用于该页面；src/api/client.ts 与页面接口注册配置已同步更新。未执行打包、测试、lint 或项目启动。
+
+## 12. 后续接手建议
+
+1. 联调前先确认租户 ID、项目空间 ID、来源系统 ID 已正确写入本地上下文。
+2. 逐页核对真实响应，重点检查列表响应外层结构、分页字段和枚举值。
+3. 后端新增列表端点或返回字段后，同步更新页面查询条件、表头及 `*[0m 标识。
+4. 新增正式接口时同步维护接口模块、页面注册配置和 `swaggerEndpointPatterns[0m。
+
+## 2026-09-29 Swagger 接口对接与编辑故障记录
+
+### 编辑故障与处理
+
+- `Standards.vue` 连续编辑失败的根因是一次 `apply_patch_batch` 中对同一路径同时执行 Delete File 和 Add File；该工具不接受这种操作。改用 `apply_patch_update_file` 对单文件做增量修改后，标准页编辑得以继续。
+- 随后的部分增量补丁提示 `Failed to find expected lines`，原因是补丁期望的上下文与文件当前内容不完全匹配，整次调用未应用。处理方式是用 `rg -n` 定位当前行、缩小为精确的单行或小段补丁，并在改动后重新查看相关调用链；不要反复提交同一失败补丁，更不要再对同一路径同时删除和新增。
+- 这次在标准页将代码项的所属值域固定为当前选中值域，避免弹窗选了其他值域、保存却写入原值域；新增和编辑弹窗标题也已区分。
+
+### 当前接口接线
+
+- 参照 `http://192.168.1.39/api/tcmirp/v3/api-docs` 当时的 Swagger。`src/api/standards.ts` 和 `src/pages/governance/Standards.vue` 已接数据元、值域、代码项的分页列表、创建、编辑、启停；标准页在 `src/config/pageApiRegistry.ts` 与 `src/components/layout/Sidebar.vue` 中标记已接线。
+- `src/api/governance.ts`、`src/pages/governance/Sources.vue` 已接来源系统注册、分页列表、详情、编辑；编辑提交乐观锁 `lockVersion`，不再附带只用于注册的来源系统代码。页面接口清单已更新。
+- `src/api/events.ts`、`src/pages/governance/EventConfig.vue` 已把事件类型及 Schema 配置改到 `/openapi/v1/event-fact/event-types` 和 `/openapi/v1/event-fact/schemas/definitions`：服务端列表/详情、创建草稿、按定义 ID 测试与发布。创建请求改用 `fields`、`referenceRules`；页面增加数组基本结构检查。`src/components/specialized/SchemaEventForm.vue` 去除了旧 Payload 预检按钮，因为新版 Schema 测试接口不接受 Payload。页面接口清单与侧栏旧 `/config` 路径已调整。
+- 之前工作区已有多个其他页面和 API 文件的未提交改动，包括 APP-01、APP-02 等模块；本轮没有逐一完成联调核验，不能因页面显示“已对接”就认定其所有操作已通过后端测试。
+
+### 未完成与注意
+
+- 本轮没有执行打包、类型检查或实际业务接口联调，以上“已接线”仅表示代码调用已改为所查 Swagger 契约，不代表后端调用成功。
+- `src/api/events.ts` 仍留有 `validateEvent` 方法，调用会抛出“不支持 Payload 预检”；`src/api/client.ts` 的白名单仍含旧 `/openapi/v1/event-fact/config/*` 规则。这两处旧代码未清理，不要将其标记为可用接口。
+- Schema 页当前列表请求固定第一页最多 200 条，未实现继续翻页；标准页筛选是对当前页数据做本地过滤。后续若需要完整分页搜索，须按 Swagger 的查询参数补齐。

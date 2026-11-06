@@ -1,0 +1,298 @@
+import { request } from './client';
+import { demo, isStaticMode, submitStaticEvent } from '../stores/demoStore';
+import type { TrustEvent } from '@/types';
+import { submitSupplyChainEvent } from './supplyChain';
+
+export interface EventTypeRequest {
+  eventType: string;
+  eventName: string;
+  scenarioCode: string;
+  description?: string;
+}
+
+export interface EventTypeResponse {
+  id: string;
+  eventType: string;
+  status: string;
+}
+export interface EventTypeDetail extends EventTypeResponse, EventTypeRequest {
+  lockVersion: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface EventSchemaRequest {
+  eventType: string;
+  schemaVersion: string;
+  fields: EventSchemaField[];
+  referenceRules: EventSchemaReferenceRule[];
+}
+export interface EventSchemaUpdateRequest {
+  fields: EventSchemaField[];
+  referenceRules: EventSchemaReferenceRule[];
+  lockVersion: number;
+}
+
+export interface SchemaSnapshot {
+  id: string;
+  eventType: string;
+  schemaVersion: string;
+  schemaJson: string;
+  fields: EventSchemaField[];
+  referenceRules: EventSchemaReferenceRule[];
+  lockVersion: number;
+  status: 'DRAFT' | 'PUBLISHED' | string;
+  contentDigest?: string;
+}
+
+export interface SchemaTestResult {
+  valid: boolean;
+  errors: string[];
+}
+export interface EventSchemaField {
+  id?: string; fieldName: string; displayName: string; dataType: string; required: boolean;
+  minLength?: number; maxLength?: number; pattern?: string;
+  minimum?: number; maximum?: number; exclusiveMinimum?: boolean; exclusiveMaximum?: boolean; multipleOf?: number;
+  description?: string;
+  dataElementCode?: string; valueSetCode?: string; valueSetVersion?: string;
+  codeSchemeCode?: string; codeSchemeVersion?: string;
+}
+export interface EventSchemaReferenceRule {
+  id?: string; fieldName: string; targetType: string; namespace: string; required: boolean;
+  onNotFound: string; onAmbiguous: string;
+}
+function snapshot(item: any): SchemaSnapshot {
+  const fields: EventSchemaField[] = item.fields || [];
+  const typeMap: Record<string, string> = { STRING: 'string', DATE: 'string', DATETIME: 'string', INTEGER: 'integer', DECIMAL: 'number', BOOLEAN: 'boolean', OBJECT: 'object', ARRAY: 'array' };
+  const properties = Object.fromEntries(fields.map(field => [field.fieldName, { type: typeMap[field.dataType] || 'string', title: field.displayName }]));
+  return { ...item, fields, referenceRules: item.referenceRules || [], schemaJson: JSON.stringify({ type: 'object', properties, required: fields.filter(field => field.required).map(field => field.fieldName) }) };
+}
+
+/**
+ * 可信事件上报与查询接口
+ */
+export const eventsApi = {
+  async getEventType(id: string): Promise<EventTypeDetail> {
+    return request.get<EventTypeDetail, EventTypeDetail>(`/openapi/v1/event-fact/event-types/${encodeURIComponent(id)}`);
+  },
+  async updateEventType(id: string, data: Omit<EventTypeRequest, 'eventType'> & { lockVersion: number }): Promise<EventTypeDetail> {
+    return request.put<EventTypeDetail, EventTypeDetail>(`/openapi/v1/event-fact/event-types/${encodeURIComponent(id)}`, { ...data, description: data.description || '' });
+  },
+  async setEventTypeStatus(id: string, status: string, lockVersion: number): Promise<EventTypeDetail> {
+    return request.patch<EventTypeDetail, EventTypeDetail>(`/openapi/v1/event-fact/event-types/${encodeURIComponent(id)}/status`, { status, lockVersion });
+  },
+  async createEventType(data: EventTypeRequest): Promise<EventTypeResponse> {
+    return request.post<EventTypeResponse, EventTypeResponse>('/openapi/v1/event-fact/event-types', { ...data, description: data.description || '' });
+  },
+
+  async createSchemaDraft(data: EventSchemaRequest): Promise<SchemaSnapshot> {
+    const result = await request.post<any, any>('/openapi/v1/event-fact/schemas/definitions', data);
+    return snapshot(result);
+  },
+  async updateSchemaDraft(id: string, data: EventSchemaUpdateRequest): Promise<SchemaSnapshot> {
+    return snapshot(await request.post(`/openapi/v1/event-fact/schemas/definitions/${encodeURIComponent(id)}`, data));
+  },
+
+  // APP-04 单字段保存与删除 (2026-10-23 修改schema字段需要一条条提交)
+  async addSchemaField(schemaId: string, field: EventSchemaField, lockVersion: number): Promise<SchemaSnapshot> {
+    const res = await request.post(`/openapi/v1/event-fact/schemas/definitions/${encodeURIComponent(schemaId)}/fields`, { field, lockVersion });
+    return snapshot(res);
+  },
+  async updateSchemaField(schemaId: string, fieldId: string, field: EventSchemaField, lockVersion: number): Promise<SchemaSnapshot> {
+    const res = await request.post(`/openapi/v1/event-fact/schemas/definitions/${encodeURIComponent(schemaId)}/fields/${encodeURIComponent(fieldId)}`, { field, lockVersion });
+    return snapshot(res);
+  },
+  async deleteSchemaField(schemaId: string, fieldId: string, lockVersion: number): Promise<SchemaSnapshot> {
+    const res = await request.get(`/openapi/v1/event-fact/schemas/definitions/${encodeURIComponent(schemaId)}/fields/${encodeURIComponent(fieldId)}/delete`, { params: { lockVersion } });
+    return snapshot(res);
+  },
+  async copySchemaDraft(schemaId: string, targetVersion: string): Promise<SchemaSnapshot> {
+    const res = await request.post(`/openapi/v1/event-fact/schemas/definitions/${encodeURIComponent(schemaId)}/copy`, { targetVersion });
+    return snapshot(res);
+  },
+  async listFieldGenerators(): Promise<any[]> {
+    return request.get('/openapi/v1/event-fact/schemas/generators');
+  },
+
+  async testSchemaDraft(data: EventSchemaRequest): Promise<SchemaTestResult> {
+    return request.post<SchemaTestResult, SchemaTestResult>('/openapi/v1/event-fact/schemas/test', data);
+  },
+
+  async publishEventSchema(id: string): Promise<SchemaSnapshot> {
+    return snapshot(await request.post(`/openapi/v1/event-fact/schemas/definitions/${encodeURIComponent(id)}/publish`));
+  },
+  async listSchemaDefinitions(params: Record<string, string | number> = {}): Promise<{ records: SchemaSnapshot[]; total: string }> {
+    const page: any = await request.get('/openapi/v1/event-fact/schemas/definitions', { params });
+    return { ...page, records: (page.records || []).map(snapshot) };
+  },
+  async getSchemaDefinition(id: string): Promise<SchemaSnapshot> {
+    return snapshot(await request.get(`/openapi/v1/event-fact/schemas/definitions/${encodeURIComponent(id)}`));
+  },
+  async testSchemaDefinition(id: string): Promise<SchemaTestResult> {
+    return request.post<SchemaTestResult, SchemaTestResult>(`/openapi/v1/event-fact/schemas/definitions/${encodeURIComponent(id)}/test`);
+  },
+  async listEventTypes(params: Record<string, string | number> = {}): Promise<{ records: any[]; total: string }> {
+    return request.get<{ records: EventTypeDetail[]; total: string }, { records: EventTypeDetail[]; total: string }>('/openapi/v1/event-fact/event-types', { params });
+  },
+
+  // APP-04 事件配置与事实引擎: GET /openapi/v1/event-fact/events
+  async queryEventsPaged(params?: {
+    tenantId?: string;
+    projectSpaceId?: string;
+    sourceSystemId?: string;
+    eventType?: string;
+    schemaVersion?: string;
+    sourceBusinessKey?: string;
+    processingStatus?: string;
+    occurredFrom?: string;
+    occurredTo?: string;
+    page?: number | string;
+    size?: number | string;
+  }): Promise<{ records: any[]; total: string; page: string; size: string }> {
+    if (isStaticMode()) {
+      const filtered = demo.events.filter(r =>
+        (!params?.eventType || r.eventType === params.eventType) &&
+        (!params?.sourceBusinessKey || String(r.businessKey || '').includes(params.sourceBusinessKey)) &&
+        (!params?.processingStatus || r.processStatus === params.processingStatus)
+      );
+      return {
+        records: filtered.map(r => ({
+          id: r.eventId,
+          eventType: r.eventType,
+          schemaVersion: r.schemaVersion,
+          sourceBusinessKey: r.businessKey,
+          occurredAt: r.occurredAt,
+          processingStatus: r.processStatus,
+          payloadDigest: r.payloadDigest,
+          payloadJson: JSON.stringify(r.payload || {})
+        })),
+        total: String(filtered.length),
+        page: String(params?.page || '1'),
+        size: String(params?.size || '20')
+      };
+    }
+    return request.get('/openapi/v1/event-fact/events', { params });
+  },
+
+  async queryTrustEvents(params?: {
+    eventId?: string | number;
+    businessKey?: string;
+    eventType?: string;
+    processStatus?: string;
+    proofStatus?: string;
+    occurredFrom?: string;
+    occurredTo?: string;
+    page?: number | string;
+    size?: number | string;
+  }): Promise<TrustEvent[]> {
+    if (isStaticMode()) return demo.events.filter(r => (!params?.eventId || r.eventId === String(params.eventId)) && (!params?.eventType || r.eventType === params.eventType) && (!params?.businessKey || String(r.businessKey || '').includes(params.businessKey)) && (!params?.processStatus || r.processStatus === params.processStatus) && (!params?.proofStatus || r.proofStatus === params.proofStatus));
+    if (params?.eventId) {
+      return request.get(`/openapi/v1/event-fact/events/${params.eventId}`).then((item: any) => [{
+          eventId: String(item.id),
+          eventType: item.eventType,
+          eventTypeName: item.eventType,
+          occurredAt: item.occurredAt,
+          sourceSystem: String(item.sourceSystemId || ''),
+          processStatus: item.processingStatus,
+          proofStatus: 'PENDING',
+          businessKey: item.sourceBusinessKey,
+          payload: typeof item.payloadJson === 'string' ? JSON.parse(item.payloadJson || '{}') : item.payloadJson,
+          schemaVersion: item.schemaVersion,
+          payloadDigest: item.payloadDigest
+        }]);
+    }
+    const res: any = await request.get('/openapi/v1/event-fact/events', {
+      params: {
+        eventType: params?.eventType || undefined,
+        sourceBusinessKey: params?.businessKey || undefined,
+        processingStatus: params?.processStatus || undefined,
+        occurredFrom: params?.occurredFrom || undefined,
+        occurredTo: params?.occurredTo || undefined,
+        page: params?.page || 1,
+        size: params?.size || 50
+      }
+    });
+    return (res?.records || []).map((item: any) => ({
+      eventId: String(item.id),
+      eventType: item.eventType,
+      eventTypeName: item.eventType,
+      occurredAt: item.occurredAt,
+      sourceSystem: String(item.sourceSystemId || ''),
+      processStatus: item.processingStatus,
+      proofStatus: 'PENDING',
+      businessKey: item.sourceBusinessKey,
+      payload: typeof item.payloadJson === 'string' ? JSON.parse(item.payloadJson || '{}') : item.payloadJson,
+      schemaVersion: item.schemaVersion,
+      payloadDigest: item.payloadDigest
+    }));
+  },
+
+  // GET /openapi/v1/event-fact/events/{id}
+  async getTrustEventDetail(eventId: string): Promise<TrustEvent | null> {
+    if (isStaticMode()) return demo.events.find(r => r.eventId === eventId) || null;
+    return request.get(`/openapi/v1/event-fact/events/${eventId}`).then((item: any) => ({
+        eventId: String(item.id),
+        eventType: item.eventType,
+        eventTypeName: item.eventType,
+        occurredAt: item.occurredAt,
+        sourceSystem: String(item.sourceSystemId || ''),
+        processStatus: item.processingStatus,
+        proofStatus: 'PENDING',
+        businessKey: item.sourceBusinessKey,
+        payload: typeof item.payloadJson === 'string' ? JSON.parse(item.payloadJson || '{}') : item.payloadJson,
+        schemaVersion: item.schemaVersion,
+        payloadDigest: item.payloadDigest
+      }));
+  },
+
+  // 提交事件上报并生成存证 POST /api/tcmirp/events
+  async submitEvent(payload: {
+    eventType: string; payload: Record<string, any>; schemaVersion?: string; sourceBusinessKey?: string; occurredAt?: string; rawRecordId?: string; useFactEngine?: boolean;
+  }): Promise<{ success: boolean; eventId: string; payloadDigest?: string; status?: string }> {
+    if (isStaticMode()) { const result = submitStaticEvent(payload); return { ...result, success: true }; }
+    const projectSpaceId = localStorage.getItem('tcmirp_project_space_id') || localStorage.getItem('tcmirp_project_id') || '1';
+    const sourceSystemId = localStorage.getItem('tcmirp_source_system_id') || '1';
+    const schemaVersion = payload.schemaVersion || '1.0.0';
+    const sourceBusinessKey = String(payload.sourceBusinessKey || payload.payload?.sourceBusinessKey || payload.payload?.businessKey || '');
+    if (!sourceBusinessKey.trim()) throw new Error('请填写本次动作唯一的来源业务键');
+    const occurredAt = payload.occurredAt || new Date().toISOString().slice(0,19).replace('T',' ');
+    const supplyChainPaths: Record<string, string> = {
+      WAREHOUSED: 'warehouse-receipts',
+      OUTBOUND_COMPLETED: 'warehouse-issues',
+      TRACE_CODE_ASSIGNED: 'trace-code-assignments',
+      ORDER_CONFIRMED: 'supply-orders',
+      DELIVERY_COMPLETED: 'supply-deliveries',
+      QUALITY_INSPECTED: 'quality-inspections',
+      PRIMARY_PROCESSED: 'primary-processes',
+      PRESCRIPTION_RECEIVED: 'prescriptions',
+      PLEDGE_CONFIRMED: 'pledges',
+      PLANTED: 'plantings',
+      INPUT_APPLIED: 'input-applications',
+      HARVESTED: 'harvests',
+      FARMING_OPERATION: 'farming-operations',
+      DECOCTION_PROCESSED: 'decoction-processes',
+      DECOCTION_DELIVERED: 'decoction-deliveries'
+    };
+    const supplyPath = payload.useFactEngine ? undefined : supplyChainPaths[payload.eventType];
+    const res: any = supplyPath
+      ? await submitSupplyChainEvent(supplyPath, { schemaVersion, sourceBusinessKey, occurredAt, payload: payload.payload })
+      : await request.post('/openapi/v1/event-fact/events', { projectSpaceId, sourceSystemId, eventType:payload.eventType, schemaVersion, sourceBusinessKey, occurredAt, payloadJson:JSON.stringify(payload.payload),rawRecordId:payload.rawRecordId||undefined },{headers:{'X-Idempotency-Key':sourceBusinessKey}});
+    if (!res?.eventId && !res?.id) throw new Error('接口未返回事件 ID');
+    return { success:true,eventId:String(res.eventId||res.id),payloadDigest:res.payloadDigest,status:res.status||res.processingStatus };
+  },
+
+  // 预检验事件 Payload 合规性 POST /api/tcmirp/events/validate
+  async validateEvent(payload: {
+    eventType: string;
+    payload: Record<string, any>;
+  }): Promise<{ valid: boolean; errors: string[] }> {
+    throw new Error('当前接口仅支持 Schema 配置测试，不支持 Payload 预检');
+  },
+
+  // 获取已发布事件 Schema（Swagger: /openapi/v1/event-fact/schemas/{eventType}/{schemaVersion}）
+  async getEventSchema(eventType: string, schemaVersion = '1.0.0'): Promise<SchemaSnapshot> {
+    const page = await this.listSchemaDefinitions({ eventType, schemaVersion, status: 'PUBLISHED', page: 1, size: 1 });
+    if (!page.records.length) throw new Error('未找到已发布 Schema');
+    return this.getSchemaDefinition(page.records[0].id);
+  }
+};

@@ -1,0 +1,261 @@
+<template>
+  <div class="exchange-page flex flex-col h-full gap-4">
+    <PageHeader
+      title="互通投影"
+      subtitle="数据集投影与外发规范包管理，实时追踪对外数据推送结果与验证状态"
+    >
+      <template #actions>
+        <el-button :loading="processing" @click="processProjection">执行补偿处理</el-button>
+        <el-button type="primary" @click="createDialogVisible = true">
+          <el-icon class="mr-1"><RefreshRight /></el-icon>
+          新建投影任务
+        </el-button>
+      </template>
+    </PageHeader>
+
+    <div class="panel flex-1 flex flex-col bg-white border border-gray-200 rounded-md shadow-sm overflow-hidden">
+      <div class="p-4 border-b border-gray-100 flex items-center justify-between bg-gray-50/50">
+        <div class="flex items-center gap-2 text-sm font-medium text-gray-700">
+          当前查询结果 ({{ projections.length }})
+        </div>
+        <div class="projection-query">
+          <el-input
+            v-model="searchQuery" 
+            placeholder="投影 ID"
+            style="width: 180px"
+            @keyup.enter="loadProjections"
+          />
+          <el-input v-model="projectSpaceId" placeholder="项目空间 ID" style="width:220px" />
+          <el-input v-model="purposeCode" placeholder="访问用途" style="width: 150px" />
+          <el-checkbox v-model="includeOutput">输出</el-checkbox>
+          <el-checkbox v-model="includeValidationDetails">校验详情</el-checkbox>
+          <el-button type="primary" :loading="loading" @click="loadProjections">查询</el-button>
+        </div>
+      </div>
+      
+      <div class="p-4 flex-1 overflow-auto">
+        <el-table :data="filteredProjections" style="width: 100%" height="100%" border stripe>
+          <el-table-column type="expand">
+            <template #default="props">
+              <div class="projection-detail">
+                <div><strong>输出数据 (output)</strong><pre>{{ formatJson(props.row.output) }}</pre></div>
+                <div><strong>字段溯源 (traceback)</strong><pre>{{ formatJson(props.row.traceback) }}</pre></div>
+                <div><strong>错误详情 (errors)</strong><pre>{{ formatJson(props.row.errors) }}</pre></div>
+              </div>
+            </template>
+          </el-table-column>
+          
+          <el-table-column label="任务编号" prop="projectionNo" width="190" class-name="mono text-xs text-gray-600" />
+          <el-table-column label="规范版本 ID" prop="profileVersionId" width="140" class-name="mono" />
+          <el-table-column label="数据集代码" prop="datasetCode" width="170" class-name="mono" />
+          
+          <el-table-column label="规范包与数据集" min-width="220">
+            <template #default="{ row }">
+              <div class="flex flex-col gap-1 py-1">
+                <span class="font-medium text-gray-800">{{ row.profileName }}</span>
+                <span class="text-xs text-gray-500">
+                  <el-tag size="small" type="info" class="mr-1">{{ row.profileCode }}</el-tag>
+                  v{{ row.version }} | {{ row.datasetName }}
+                </span>
+              </div>
+            </template>
+          </el-table-column>
+          
+          <el-table-column label="数据截止时间" prop="asOfTime" width="180" />
+          <el-table-column label="输出摘要" prop="outputDigest" min-width="200" class-name="mono" show-overflow-tooltip />
+          <el-table-column label="替代投影 ID" prop="supersedesProjectionId" width="140" class-name="mono" />
+          
+          <el-table-column label="输出记录数" prop="recordCount" width="120" align="right">
+            <template #default="{ row }">
+              <span class="font-semibold text-gray-700">{{ row.recordCount }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column label="异常数" prop="errorCount" width="90" align="right">
+            <template #default="{ row }">
+              <span :class="row.errorCount > 0 ? 'text-red-500 font-bold' : 'text-gray-400'">
+                {{ row.errorCount }}
+              </span>
+            </template>
+          </el-table-column>
+          
+          <el-table-column label="状态" width="130" align="center">
+            <template #default="{ row }">
+              <StatusTag :code="row.status" />
+            </template>
+          </el-table-column>
+          
+          <el-table-column label="操作" width="140" fixed="right">
+            <template #default="{ row }">
+              <el-button link type="primary" size="small" @click="viewDetails(row)">
+                任务详情
+              </el-button>
+              <el-button link type="primary" size="small" :disabled="row.output == null" @click="downloadOutput(row)">
+                下载
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+    </div>
+
+    <el-dialog v-model="createDialogVisible" title="新建投影任务" width="min(620px,94vw)" :close-on-click-modal="false">
+      <el-form :model="createForm" label-position="top">
+        <div class="form-grid">
+          <el-form-item label="规范包代码" required><el-input v-model="createForm.profileCode" /></el-form-item>
+          <el-form-item label="规范包版本" required><el-input v-model="createForm.profileVersion" /></el-form-item>
+          <el-form-item label="主体类型" required>
+            <el-select v-model="createForm.subjectType" style="width: 100%">
+              <el-option label="EVENT" value="EVENT" /><el-option label="OBJECT" value="OBJECT" /><el-option label="BATCH" value="BATCH" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="项目空间 ID" required><el-input v-model="createForm.projectSpaceId" /></el-form-item>
+        </div>
+        <el-form-item label="主体 ID（逗号分隔）" required><el-input v-model="subjectIdsText" /></el-form-item>
+        <el-form-item label="数据集代码（逗号分隔，可选）"><el-input v-model="datasetCodesText" /></el-form-item>
+        <el-form-item label="数据截止时间（可选）"><el-date-picker v-model="createForm.asOfTime" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" style="width: 100%" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="generateNew">提交</el-button>
+      </template>
+    </el-dialog>
+    <el-drawer v-model="detailVisible" title="投影任务详情" size="min(680px,94vw)"><pre style="white-space:pre-wrap;overflow-wrap:anywhere">{{ formatJson(activeProjection) }}</pre></el-drawer>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue';
+import { useRoute } from 'vue-router';
+import { demo, isStaticMode } from '@/stores/demoStore';
+const route=useRoute();
+import { ElMessage, ElMessageBox } from 'element-plus';
+import { extendedServices } from '@/api/extendedServices';
+import { RefreshRight } from '@element-plus/icons-vue';
+import PageHeader from '@/components/common/PageHeader.vue';
+import StatusTag from '@/components/common/StatusTag.vue';
+import { exchangeApi } from '@/api/exchange';
+import { apiErrorMessage } from '@/api/client';
+import type { ExchangeProjection } from '@/types';
+
+const projections = ref<ExchangeProjection[]>([]);
+const searchQuery = ref('');
+const processing=ref(false), detailVisible=ref(false), activeProjection=ref<ExchangeProjection|null>(null);
+const loading = ref(false);
+const projectSpaceId = ref(localStorage.getItem('tcmirp_project_space_id') || '');
+const purposeCode = ref(localStorage.getItem('tcmirp_purpose_code') || 'TRACE');
+const includeOutput = ref(true);
+const includeValidationDetails = ref(true);
+const createDialogVisible = ref(false);
+const creating = ref(false);
+const subjectIdsText = ref('1');
+const datasetCodesText = ref('');
+const createForm = ref({
+  projectSpaceId: localStorage.getItem('tcmirp_project_space_id') || '',
+  profileCode: '', profileVersion: '1.0.0', subjectType: 'BATCH', asOfTime: ''
+});
+
+const loadProjections = async () => {
+  if(isStaticMode() && !searchQuery.value && demo.projections.length) searchQuery.value=demo.projections[0].projectionId;
+  if (!searchQuery.value) {
+    projections.value = [];
+    return;
+  }
+  loading.value = true;
+  try {
+    const item = await exchangeApi.getProjection(searchQuery.value, {
+      projectSpaceId: projectSpaceId.value, purposeCode: purposeCode.value,
+      includeOutput: includeOutput.value, includeValidationDetails: includeValidationDetails.value
+    });
+    const errors = Array.isArray(item.errors) ? item.errors : item.errors ? [item.errors] : [];
+    projections.value = [{
+      id: String(item.projectionId), projectionNo: String(item.projectionId), profileCode: item.profileCode || '', profileName: isStaticMode() ? demo.collections.profiles.find(r=>r.profileCode===item.profileCode)?.profileName || '' : '',
+      version: item.profileVersion || '', datasetName: item.datasetCode, asOfTime: item.asOfTime, status: item.status, recordCount: Array.isArray(item.output)?item.output.length:Number(item.recordCount??0),
+      outputHash: item.outputDigest, errorCount: errors.length, profileVersionId: item.profileVersionId,
+      datasetCode: item.datasetCode, outputDigest: item.outputDigest, output: item.output,
+      traceback: item.traceback, errors: item.errors, supersedesProjectionId: item.supersedesProjectionId
+    }];
+  } catch (err) {
+    ElMessage.error(apiErrorMessage(err,'投影查询失败'));
+    projections.value = [];
+  } finally {
+    loading.value = false;
+  }
+};
+
+const filteredProjections = computed(() => {
+  return projections.value;
+});
+onMounted(()=>{if(isStaticMode()){createForm.value.projectSpaceId='1';createForm.value.profileCode=demo.collections.profiles[0]?.profileCode||'';subjectIdsText.value=String(route.query.eventId||route.query.batchNo||demo.fields[0].id);if(route.query.eventId||route.query.batchNo){createForm.value.subjectType=route.query.eventId?'EVENT':'BATCH';createDialogVisible.value=true;}void loadProjections();}});
+
+const generateNew = async () => {
+  const subjectIds = subjectIdsText.value.split(',').map(item => item.trim());
+  if (!createForm.value.profileCode || !createForm.value.profileVersion || !/^\d+$/.test(createForm.value.projectSpaceId) || !subjectIds.length || subjectIds.some(id=>isStaticMode()&&createForm.value.subjectType==='BATCH'?!id:!/^\d+$/.test(id))) {
+    ElMessage.warning('请填写规范包代码、版本和有效主体 ID');
+    return;
+  }
+  creating.value = true;
+  try {
+    const result = await exchangeApi.createProjection({
+      ...createForm.value, subjectIds,
+      datasetCodes: datasetCodesText.value.split(',').map(item => item.trim()).filter(Boolean),
+      asOfTime: createForm.value.asOfTime || undefined, deliveryMode: 'QUERY_ONLY'
+    });
+    createDialogVisible.value = false;
+    if (result?.projectionId) {
+      searchQuery.value = String(result.projectionId);
+      projectSpaceId.value = createForm.value.projectSpaceId;
+      await loadProjections();
+    }
+    ElMessage.success('投影任务已受理');
+  } catch (err) {
+    ElMessage.error(apiErrorMessage(err, '投影任务提交失败'));
+  } finally {
+    creating.value = false;
+  }
+};
+
+const viewDetails = (row: ExchangeProjection) => {
+  activeProjection.value=row;detailVisible.value=true;
+};
+
+const formatJson = (value: any) => JSON.stringify(value ?? null, null, 2);
+function downloadOutput(row:ExchangeProjection){const url=URL.createObjectURL(new Blob([formatJson(row.output)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=`projection-${row.id}.json`;a.click();URL.revokeObjectURL(url);}
+async function processProjection(){if(!/^\d+$/.test(searchQuery.value)||!/^\d+$/.test(projectSpaceId.value)){ElMessage.warning('请填写项目空间和投影 ID');return;}try{await ElMessageBox.confirm('确认对指定投影执行幂等补偿处理？','确认操作',{type:'warning'});}catch{return;}processing.value=true;try{await extendedServices.processProjection(projectSpaceId.value,searchQuery.value);ElMessage.success('补偿处理已执行');await loadProjections();}catch(e){ElMessage.error(apiErrorMessage(e,'补偿处理失败'));}finally{processing.value=false;}}
+</script>
+
+<style scoped>
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.projection-detail {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px 18px;
+}
+
+.projection-query {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 14px;
+}
+
+.projection-detail pre {
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px;
+  background: #f6f8f7;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+</style>

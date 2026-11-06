@@ -1,0 +1,320 @@
+import { request } from './client';
+import { demo, isStaticMode } from '../stores/demoStore';
+import { mockGovernanceCases } from './mockData';
+import type { GovernanceCase } from '@/types';
+
+export interface IngestBatch {
+  batchId: string;
+  sourceSystem: string;
+  totalCount: string;
+  successCount: string;
+  failCount: string;
+  startTime: string;
+  status: string;
+  errorLogs?: string[];
+  mappingProfileVersion?: string;
+  targetSchemaVersions?: Record<string, string>;
+  processedAt?: string;
+  failedRecordDetails?: FailedRecordDetail[];
+}
+
+export interface FailedRecordDetail {
+  lineNo?: string;
+  code?: string;
+  fieldPath?: string;
+  ruleCode?: string;
+  message?: string;
+}
+
+export interface SourceSystemRequest {
+  sourceSystemCode: string;
+  sourceSystemName: string;
+  sourceSystemType: string;
+  ownerPartyId?: string;
+  endpointType?: 'API' | 'FILE' | 'MESSAGE' | 'DATABASE' | string;
+  baseUrl?: string;
+  signaturePublicKey?: string;
+  signatureAlgorithm?: string;
+  trustLevel?: string;
+  defaultPurposeCodes?: string[];
+  status: 'ACTIVE' | 'INACTIVE';
+}
+
+export interface SourceSystemResponse {
+  sourceSystemId: string;
+  sourceSystemCode: string;
+  version?: string;
+  status: string;
+  registeredAt?: string;
+}
+
+export interface SourceSystemManagement extends SourceSystemRequest {
+  sourceSystemId: string;
+  lockVersion: number;
+  version?: string;
+  createdAt?: string;
+}
+export type SourceSystemUpdateRequest = Omit<SourceSystemRequest, 'sourceSystemCode'> & { ownerPartyId: string; lockVersion: number };
+export interface PreserveRawCommand {
+  projectSpaceId: string;
+  batchId?: string;
+  sourceSystemId: string;
+  sourceBusinessKey: string;
+  contentType: string;
+  contentDigest?: string;
+  rawPayload?: string;
+  fileFragmentRef?: string;
+}
+
+export interface RawRecordAccepted {
+  rawRecordId: string;
+  contentDigest: string;
+  status: string;
+  duplicate: boolean;
+}
+
+export interface ReplayAccepted {
+  replayId: string;
+  rawRecordId: string;
+  mappingVersion: string;
+  status: string;
+  requestedAt: string;
+}
+
+export interface MappingPrecheckRequest {
+  mappingProfileCode: string;
+  mappingProfileVersion: string;
+  sourceSystemId: string;
+  targetEventType: string;
+  targetSchemaVersion: string;
+  sourceSample: Record<string, any>;
+  dryRun?: boolean;
+  failOnWarning?: boolean;
+}
+
+export interface MappingIssue {
+  fieldPath: string;
+  errorCode: string;
+  message: string;
+  ruleCode: string;
+}
+
+export interface MappingPreview {
+  passed: boolean;
+  mappedEventType: string;
+  mappingProfileVersion: string;
+  targetSchemaVersion: string;
+  mappedPayload: Record<string, any>;
+  issues: MappingIssue[];
+  governanceTickets?: string[];
+}
+
+export interface BatchRequest {
+  batchCode: string;
+  sourceSystemId: string;
+  mappingProfileCode: string;
+  mappingProfileVersion: string;
+  inputFormat: string;
+  fileId: string;
+  expectedRecordCount?: string;
+  sourceBatchKey?: string;
+  businessPurpose: string;
+  onError?: 'STOP_ON_ERROR' | 'CONTINUE_ON_ERROR' | string;
+  submitMode?: 'ASYNC' | 'SYNC' | string;
+}
+
+export interface BatchResponse {
+  batchId: string;
+  batchCode: string;
+  batchStatus: string;
+  acceptedAt: string;
+  statusQueryUrl?: string;
+}
+
+export interface SourceSystem {
+  id: string;
+  systemCode: string;
+  systemName: string;
+  protocol: string;
+  endpointUrl: string;
+  authType: string;
+  status: 'ONLINE' | 'OFFLINE' | 'ACTIVE' | 'INACTIVE';
+  lastHeartbeat: string;
+  ownerPartyId?: string;
+  version?: string;
+  registeredAt?: string;
+}
+
+/**
+ * 接入治理接口 (Swagger: /openapi/v1/*)
+ */
+export const governanceApi = {
+  // ================= 1. 注册来源系统 POST /openapi/v1/source-systems =================
+  async registerSourceSystem(data: SourceSystemRequest): Promise<SourceSystemResponse> {
+    return request.post<SourceSystemResponse, SourceSystemResponse>('/openapi/v1/source-systems', data);
+  },
+
+  async listSourceSystems(params: Record<string, string | number | undefined>): Promise<{ records: SourceSystemManagement[]; total: string }> {
+    return request.get('/openapi/v1/source-systems', { params });
+  },
+
+  async getSourceSystem(id: string): Promise<SourceSystemManagement> {
+    return request.get(`/openapi/v1/source-systems/${encodeURIComponent(id)}`);
+  },
+
+  async listSelectableSources(tenantId: string): Promise<SourceSystemManagement[]> {
+    const records: SourceSystemManagement[] = [];
+    for (let page = 1; ; page++) {
+      const result: any = await request.get('/openapi/v1/source-systems/tenant', { params: { tenantId, page, size: 200 } });
+      records.push(...(result.records || []));
+      if (!result.records?.length || records.length >= Number(result.total)) return records;
+    }
+  },
+
+  async updateSourceSystem(id: string, data: SourceSystemUpdateRequest): Promise<SourceSystemManagement> {
+    return request.post(`/openapi/v1/source-systems/${encodeURIComponent(id)}`, data);
+  },
+
+  // ================= 2. APP-03 来源接入与数据治理 =================
+  // GET /openapi/v1/raw-records
+  async listRawRecords(params?: {
+    tenantId?: string;
+    projectSpaceId?: string;
+    sourceSystemId?: string;
+    sourceBusinessKey?: string;
+    status?: string;
+    receivedFrom?: string;
+    receivedTo?: string;
+    page?: number | string;
+    size?: number | string;
+  }): Promise<{ records: any[]; total: string; page: string; size: string }> {
+    return request.get('/openapi/v1/raw-records', { params });
+  },
+
+  // GET /openapi/v1/raw-records/{rawRecordId}
+  async getRawRecord(rawRecordId: string, tenantId?: string): Promise<any> {
+    return request.get(`/openapi/v1/raw-records/${encodeURIComponent(rawRecordId)}`, { params: { tenantId } });
+  },
+
+  // POST /openapi/v1/raw-records
+  async preserveRawRecord(command: PreserveRawCommand): Promise<RawRecordAccepted> {
+    return request.post<RawRecordAccepted, RawRecordAccepted>('/openapi/v1/raw-records', command);
+  },
+
+  // POST /openapi/v1/raw-records/{rawRecordId}/replays
+  async replayRawRecord(
+    rawRecordId: string,
+    mappingVersion: string = 'STANDARD',
+    reason: string = '异常规则已修正，手动触发重放'
+  ): Promise<ReplayAccepted> {
+    const query = new URLSearchParams({
+      mappingVersion,
+      reason
+    });
+
+    return request.post<ReplayAccepted, ReplayAccepted>(`/openapi/v1/raw-records/${rawRecordId}/replays?${query.toString()}`);
+  },
+
+  // ================= 3. APP-03 系统值域映射 =================
+  async listSystemValueSetMappings(sourceSystemId: string, params?: {
+    valueSetId?: string;
+    systemItemCode?: string;
+    status?: 'ACTIVE' | 'INACTIVE';
+    page?: number | string;
+    size?: number | string;
+  }): Promise<{ records: any[]; total: string; page: string; size: string }> {
+    return request.get(`/openapi/v1/source-systems/${encodeURIComponent(sourceSystemId)}/value-set-mappings`, { params });
+  },
+
+  async createSystemValueSetMapping(sourceSystemId: string, data: {
+    valueSetId: string;
+    systemItemCode: string;
+    systemItemName: string;
+    standardItemCode?: string;
+    mappingMode: 'DIRECT' | 'DICTIONARY' | 'RULE';
+    status: 'ACTIVE' | 'INACTIVE';
+    description?: string;
+  }): Promise<any> {
+    return request.post(`/openapi/v1/source-systems/${encodeURIComponent(sourceSystemId)}/value-set-mappings`, data);
+  },
+
+  async updateSystemValueSetMapping(sourceSystemId: string, id: string, data: {
+    valueSetId: string;
+    systemItemCode: string;
+    systemItemName: string;
+    standardItemCode?: string;
+    mappingMode: string;
+    status: 'ACTIVE' | 'INACTIVE';
+    description?: string;
+  }): Promise<any> {
+    return request.post(`/openapi/v1/source-systems/${encodeURIComponent(sourceSystemId)}/value-set-mappings/${encodeURIComponent(id)}`, data);
+  },
+
+  async getSourceSystemValueSetItems(sourceSystemId: string, valueSetId: string): Promise<any[]> {
+    return request.get(`/openapi/v1/source-systems/${encodeURIComponent(sourceSystemId)}/value-set-mappings/${encodeURIComponent(valueSetId)}/items`);
+  },
+
+  async saveAllSystemValueSetMappings(sourceSystemId: string, valueSetId: string, data: {
+    mappings: Array<{
+      systemItemCode: string;
+      systemItemName: string;
+      standardItemCode?: string;
+      mappingMode: string;
+      status: string;
+    }>
+  }): Promise<any> {
+    return request.post(`/openapi/v1/source-systems/${encodeURIComponent(sourceSystemId)}/value-set-mappings/${encodeURIComponent(valueSetId)}/save`, data);
+  },
+
+  // ================= 4. 字段映射预检与试算 POST /openapi/v1/mappings/test =================
+  async testMappingProfile(requestData: MappingPrecheckRequest): Promise<MappingPreview> {
+    return request.post<MappingPreview, MappingPreview>('/openapi/v1/mappings/test', { ...requestData, dryRun: true });
+  },
+
+  // ================= 5. 接入批次创建 POST /openapi/v1/batches =================
+  async createBatch(batchData: BatchRequest): Promise<BatchResponse> {
+    return request.post<BatchResponse, BatchResponse>('/openapi/v1/batches', batchData);
+  },
+
+  async getBatches(params?: { batchId?: string; includeFailures?: boolean; pageNo?: number; pageSize?: number }): Promise<IngestBatch[]> {
+    if (params?.batchId) {
+      return request.get<any, any>(`/openapi/v1/batches/${encodeURIComponent(params.batchId)}`, {
+          params: {
+            includeFailures: params.includeFailures ?? true,
+            pageNo: params.pageNo || 1,
+            pageSize: params.pageSize || 100
+          }
+        }).then((item: any) => [{
+          batchId: item.batchId,
+          sourceSystem: '',
+          totalCount: String(item.totalRecords || '0'),
+          successCount: String(item.successRecords || '0'),
+          failCount: String(item.failedRecords || '0'),
+          startTime: '',
+          status: String(item.batchStatus || ''),
+          mappingProfileVersion: item.mappingProfileVersion,
+          targetSchemaVersions: item.targetSchemaVersions,
+          processedAt: item.processedAt,
+          failedRecordDetails: item.failedRecordDetails
+        }]);
+    }
+    return [];
+  },
+
+  async getCases(params?: { status?: string; ruleCode?: string }): Promise<GovernanceCase[]> {
+    if (isStaticMode()) return demo.cases.filter(c => (!params?.status || c.status === params.status) && (!params?.ruleCode || c.ruleCode.includes(params.ruleCode)));
+    return mockGovernanceCases.filter(c => {
+        if (params?.status && c.status !== params.status) return false;
+        if (params?.ruleCode && !(c.ruleCode || '').includes(params.ruleCode)) return false;
+        return true;
+      });
+  },
+
+  async getStandards(): Promise<any[]> {
+    return [
+        { code: 'CS-NHSA-TCM-PIECE', name: '国家医疗保障局中药饮片分类与代码', version: '2024.12', mandatoryLength: 16 },
+        { code: 'ChP-2025-VOL1', name: '中华人民共和国药典 (一部中药材与饮片)', version: '2025年版', mandatoryLength: 0 },
+        { code: 'NMPA-TCM-TRACE', name: '国家药监局中药饮片追溯与编码规则', version: '1.2.0', mandatoryLength: 20 }
+      ];
+  }
+};
